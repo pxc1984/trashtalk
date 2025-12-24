@@ -17,7 +17,7 @@ Key goals:
 
 ## 2. High-Level Architecture
 
-The application runs as a **single Rust binary** with **two long-lived workers**:
+The application runs as a **single Rust binary** with **long-lived workers**:
 
 1. **Ingestion & Tokenization Worker**
    - Runs in a dedicated background thread
@@ -32,6 +32,11 @@ The application runs as a **single Rust binary** with **two long-lived workers**
      - Text generation
      - Introspection / health checks
    - Reads token statistics from PostgreSQL (and optional in-memory cache)
+
+3. **Telegram Inline Bot**
+   - Runs in its own thread with a dedicated Tokio runtime
+   - Answers inline queries (`@yourbot <prompt>`) by generating text via the model
+   - Requires `BOT_TOKEN` to be set
 
 ---
 

@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
 
     let _ingestion_handles =
         workers::ingestion::spawn_ingestion_workers(state.clone(), state.config.ingestion_workers);
+    let _bot_handle = workers::telegram_bot::spawn_bot(state.clone());
 
     workers::grpc_server::run_server(state.clone())
         .await

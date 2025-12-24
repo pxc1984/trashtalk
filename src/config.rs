@@ -9,6 +9,7 @@ pub struct Config {
     pub max_generation_length: usize,
     pub ingestion_interval: Duration,
     pub ingestion_workers: usize,
+    pub bot_token: Option<String>,
 }
 
 impl Config {
@@ -38,6 +39,7 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
+        let bot_token = env::var("BOT_TOKEN").ok();
 
         Ok(Self {
             database_url,
@@ -47,6 +49,7 @@ impl Config {
             max_generation_length,
             ingestion_interval: Duration::from_secs(ingestion_interval_secs),
             ingestion_workers: ingestion_workers.max(1),
+            bot_token,
         })
     }
 }

@@ -32,6 +32,59 @@ impl GeneratorService {
         Self { state }
     }
 
+    pub async fn generate_text_for_prefix(
+        &self,
+        prefix: String,
+        max_tokens: usize,
+    ) -> Result<(String, usize), Status> {
+        info!(
+            max_tokens,
+            prefix_len = prefix.len(),
+            "generate_text_for_prefix invoked"
+        );
+
+        let max_tokens = max_tokens.max(1);
+        let bos_id = db::ensure_token(&self.state.pool, &bos_token())
+            .await
+            .map_err(internal_error)?;
+        let eos_id = db::ensure_token(&self.state.pool, &eos_token())
+            .await
+            .map_err(internal_error)?;
+
+        let prefix_tokens = tokenizer::tokenize_fragments(&[TextFragment::Text(prefix)]);
+
+        debug!(token_count = prefix_tokens.len(), "prefix tokenized");
+
+        let bos_padding = self.state.ngram_size.saturating_sub(1).max(1);
+
+        let mut token_ids = Vec::with_capacity(prefix_tokens.len() + bos_padding);
+        token_ids.extend(std::iter::repeat(bos_id).take(bos_padding));
+
+        for token in &prefix_tokens {
+            let id = db::ensure_token(&self.state.pool, token)
+                .await
+                .map_err(internal_error)?;
+            token_ids.push(id);
+        }
+
+        let max_tokens = max_tokens.min(self.state.config.max_generation_length);
+
+        let mut generated =
+            self.generate_from_model(&mut token_ids, max_tokens, eos_id).await?;
+
+        if generated == 0 && token_ids.len() > bos_padding {
+            info!("prefix failed to continue, falling back to BOS-only generation");
+            token_ids.truncate(bos_padding);
+            generated = self.generate_from_model(&mut token_ids, max_tokens, eos_id).await?;
+        }
+
+        let text = self.render_text(&token_ids, bos_id, eos_id).await?;
+
+        info!(generated, final_len = text.len(), "text generation completed");
+
+        Ok((text, generated))
+    }
+
     async fn render_text(&self, token_ids: &[i64], bos_id: i64, eos_id: i64) -> Result<String, Status> {
         debug!(token_count = token_ids.len(), "render_text called");
 
@@ -183,45 +236,9 @@ impl TextGenerator for GeneratorService {
             "GenerateText request received"
         );
 
-        let max_tokens = req.max_tokens.max(1) as usize;
-        let bos_id = db::ensure_token(&self.state.pool, &bos_token())
-            .await
-            .map_err(internal_error)?;
-        let eos_id = db::ensure_token(&self.state.pool, &eos_token())
-            .await
-            .map_err(internal_error)?;
-
-        let prefix_tokens =
-            tokenizer::tokenize_fragments(&[TextFragment::Text(req.prefix.clone())]);
-
-        debug!(token_count = prefix_tokens.len(), "prefix tokenized");
-
-        let bos_padding = self.state.ngram_size.saturating_sub(1).max(1);
-
-        let mut token_ids = Vec::with_capacity(prefix_tokens.len() + bos_padding);
-        token_ids.extend(std::iter::repeat(bos_id).take(bos_padding));
-
-        for token in &prefix_tokens {
-            let id = db::ensure_token(&self.state.pool, token)
-                .await
-                .map_err(internal_error)?;
-            token_ids.push(id);
-        }
-
-        let max_tokens = max_tokens.min(self.state.config.max_generation_length);
-
-        let mut generated =
-            self.generate_from_model(&mut token_ids, max_tokens, eos_id).await?;
-
-        if generated == 0 && token_ids.len() > bos_padding {
-            info!("prefix failed to continue, falling back to BOS-only generation");
-            token_ids.truncate(bos_padding);
-            generated = self.generate_from_model(&mut token_ids, max_tokens, eos_id).await?;
-        }
-
-        let text = self.render_text(&token_ids, bos_id, eos_id).await?;
-
-        info!(generated, final_len = text.len(), "GenerateText completed");
+        let (text, generated) = self
+            .generate_text_for_prefix(req.prefix, req.max_tokens as usize)
+            .await?;
 
         Ok(Response::new(GenerateTextResponse {
             text,

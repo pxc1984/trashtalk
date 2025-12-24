@@ -55,6 +55,9 @@ FROM debian:11 AS runner
 
 WORKDIR /
 
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy final binary only
 COPY --from=builder /usr/src/app/target/release/trashtalk /trashtalk
 

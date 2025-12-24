@@ -8,6 +8,7 @@ pub enum TokenKind {
     Whitespace,
     Newline,
     CustomEmoji,
+    Special,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +26,7 @@ impl TokenKind {
             TokenKind::Whitespace => "Whitespace",
             TokenKind::Newline => "Newline",
             TokenKind::CustomEmoji => "CustomEmoji",
+            TokenKind::Special => "Special",
         }
     }
 }
@@ -45,6 +47,17 @@ impl Token {
             emoji_document_id: Some(document_id),
         }
     }
+}
+
+pub const BOS_TOKEN_VALUE: &str = "<BOS>";
+pub const EOS_TOKEN_VALUE: &str = "<EOS>";
+
+pub fn bos_token() -> Token {
+    Token::new(TokenKind::Special, Some(BOS_TOKEN_VALUE.to_string()))
+}
+
+pub fn eos_token() -> Token {
+    Token::new(TokenKind::Special, Some(EOS_TOKEN_VALUE.to_string()))
 }
 
 pub fn tokenize_text(text: &str) -> Vec<Token> {

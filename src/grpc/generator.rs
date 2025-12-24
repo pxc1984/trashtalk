@@ -14,7 +14,11 @@ use crate::{
         TokenizePreviewRequest, TokenizePreviewResponse, text_generator_server::TextGenerator,
     },
     state::SharedState,
-    tokenizer::{self, telegram::TextFragment},
+    tokenizer::{
+        self,
+        telegram::TextFragment,
+        tokens::{bos_token, eos_token},
+    },
     workers,
 };
 
@@ -28,7 +32,7 @@ impl GeneratorService {
         Self { state }
     }
 
-    async fn render_text(&self, token_ids: &[i64]) -> Result<String, Status> {
+    async fn render_text(&self, token_ids: &[i64], bos_id: i64, eos_id: i64) -> Result<String, Status> {
         debug!(token_count = token_ids.len(), "render_text called");
 
         let records = db::fetch_tokens(&self.state.pool, token_ids)
@@ -40,6 +44,13 @@ impl GeneratorService {
         let mut text = String::new();
 
         for id in token_ids {
+            if *id == bos_id {
+                continue;
+            }
+            if *id == eos_id {
+                break;
+            }
+
             let Some(token) = by_id.get(id) else {
                 warn!(token_id = id, "missing token record during rendering");
                 continue;
@@ -64,6 +75,7 @@ impl GeneratorService {
                         text.push_str("[emoji]");
                     }
                 }
+                "Special" => {} // skip BOS/EOS when rendering user-facing text
                 other => {
                     warn!(token_type = other, "unknown token type during rendering");
                 }
@@ -78,6 +90,7 @@ impl GeneratorService {
         &self,
         token_ids: &mut Vec<i64>,
         max_tokens: usize,
+        eos_id: i64,
     ) -> Result<usize, Status> {
         let context_len = self.state.ngram_size.saturating_sub(1);
         let mut generated = 0usize;
@@ -144,6 +157,11 @@ impl GeneratorService {
 
             token_ids.push(next_token);
             generated += 1;
+
+            if next_token == eos_id {
+                debug!(step, "EOS reached, stopping generation");
+                break;
+            }
         }
 
         info!(generated, "generation completed");
@@ -166,13 +184,22 @@ impl TextGenerator for GeneratorService {
         );
 
         let max_tokens = req.max_tokens.max(1) as usize;
+        let bos_id = db::ensure_token(&self.state.pool, &bos_token())
+            .await
+            .map_err(internal_error)?;
+        let eos_id = db::ensure_token(&self.state.pool, &eos_token())
+            .await
+            .map_err(internal_error)?;
 
         let prefix_tokens =
             tokenizer::tokenize_fragments(&[TextFragment::Text(req.prefix.clone())]);
 
         debug!(token_count = prefix_tokens.len(), "prefix tokenized");
 
-        let mut token_ids = Vec::with_capacity(prefix_tokens.len());
+        let bos_padding = self.state.ngram_size.saturating_sub(1).max(1);
+
+        let mut token_ids = Vec::with_capacity(prefix_tokens.len() + bos_padding);
+        token_ids.extend(std::iter::repeat(bos_id).take(bos_padding));
 
         for token in &prefix_tokens {
             let id = db::ensure_token(&self.state.pool, token)
@@ -181,14 +208,18 @@ impl TextGenerator for GeneratorService {
             token_ids.push(id);
         }
 
-        let generated = self
-            .generate_from_model(
-                &mut token_ids,
-                max_tokens.min(self.state.config.max_generation_length),
-            )
-            .await?;
+        let max_tokens = max_tokens.min(self.state.config.max_generation_length);
 
-        let text = self.render_text(&token_ids).await?;
+        let mut generated =
+            self.generate_from_model(&mut token_ids, max_tokens, eos_id).await?;
+
+        if generated == 0 && token_ids.len() > bos_padding {
+            info!("prefix failed to continue, falling back to BOS-only generation");
+            token_ids.truncate(bos_padding);
+            generated = self.generate_from_model(&mut token_ids, max_tokens, eos_id).await?;
+        }
+
+        let text = self.render_text(&token_ids, bos_id, eos_id).await?;
 
         info!(generated, final_len = text.len(), "GenerateText completed");
 

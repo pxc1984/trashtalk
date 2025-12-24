@@ -6,7 +6,11 @@ use tracing::{error, info, warn};
 use crate::{
     db,
     state::SharedState,
-    tokenizer::{self, telegram::read_export},
+    tokenizer::{
+        self,
+        telegram::read_export,
+        tokens::{bos_token, eos_token},
+    },
     trainer,
 };
 
@@ -161,7 +165,17 @@ async fn process_export(state: SharedState, export_dir: PathBuf) -> anyhow::Resu
                 .await?;
             }
 
-            trainer::ngrams::update_ngrams(&state.pool, &token_ids, state.ngram_size).await?;
+            let bos_id = db::ensure_token(&state.pool, &bos_token()).await?;
+            let eos_id = db::ensure_token(&state.pool, &eos_token()).await?;
+
+            let bos_padding = state.ngram_size.saturating_sub(1).max(1);
+
+            let mut training_ids = Vec::with_capacity(token_ids.len() + bos_padding + 1);
+            training_ids.extend(std::iter::repeat(bos_id).take(bos_padding));
+            training_ids.extend_from_slice(&token_ids);
+            training_ids.push(eos_id);
+
+            trainer::ngrams::update_ngrams(&state.pool, &training_ids, state.ngram_size).await?;
 
             sqlx::query(
                 r#"INSERT INTO ingestion_offsets (chat_id, last_message_id, updated_at)

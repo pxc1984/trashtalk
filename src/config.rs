@@ -8,6 +8,7 @@ pub struct Config {
     pub ngram_size: usize,
     pub max_generation_length: usize,
     pub ingestion_interval: Duration,
+    pub ingestion_workers: usize,
 }
 
 impl Config {
@@ -33,6 +34,10 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(30);
+        let ingestion_workers = env::var("INGESTION_WORKERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
 
         Ok(Self {
             database_url,
@@ -41,6 +46,7 @@ impl Config {
             ngram_size: ngram_size.max(2),
             max_generation_length,
             ingestion_interval: Duration::from_secs(ingestion_interval_secs),
+            ingestion_workers: ingestion_workers.max(1),
         })
     }
 }

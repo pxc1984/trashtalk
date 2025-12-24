@@ -10,16 +10,25 @@ use crate::{
     trainer,
 };
 
-pub fn spawn_ingestion_worker(state: SharedState) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().expect("ingestion runtime");
-        loop {
-            if let Err(err) = rt.block_on(run_ingestion_cycle(state.clone())) {
-                error!(error = ?err, "ingestion cycle failed");
+pub fn spawn_ingestion_workers(state: SharedState, workers: usize) -> Vec<thread::JoinHandle<()>> {
+    let worker_count = workers.max(1);
+    let mut handles = Vec::with_capacity(worker_count);
+
+    for idx in 0..worker_count {
+        let worker_state = state.clone();
+        let handle = thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("ingestion runtime");
+            loop {
+                if let Err(err) = rt.block_on(run_ingestion_cycle(worker_state.clone())) {
+                    error!(error = ?err, worker = idx, "ingestion cycle failed");
+                }
+                rt.block_on(tokio::time::sleep(worker_state.config.ingestion_interval));
             }
-            rt.block_on(tokio::time::sleep(state.config.ingestion_interval));
-        }
-    })
+        });
+        handles.push(handle);
+    }
+
+    handles
 }
 
 pub async fn run_ingestion_cycle(state: SharedState) -> anyhow::Result<()> {

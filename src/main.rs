@@ -34,7 +34,8 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState::new(config, pool));
 
-    workers::ingestion::spawn_ingestion_worker(state.clone());
+    let _ingestion_handles =
+        workers::ingestion::spawn_ingestion_workers(state.clone(), state.config.ingestion_workers);
 
     workers::grpc_server::run_server(state.clone())
         .await

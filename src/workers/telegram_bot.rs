@@ -3,13 +3,13 @@ use std::thread;
 use teloxide::{
     prelude::*,
     types::{
-        InlineQuery, InlineQueryResult, InlineQueryResultArticle, InputMessageContent,
+        ChatType, InlineQuery, InlineQueryResult, InlineQueryResultArticle, InputMessageContent,
         InputMessageContentText,
     },
 };
 use tracing::{debug, error, info, warn};
 
-use crate::{grpc::generator::GeneratorService, state::SharedState};
+use crate::{db, grpc::generator::GeneratorService, state::SharedState};
 
 pub fn spawn_bot(state: SharedState) -> Option<thread::JoinHandle<()>> {
     let Some(token) = state.config.bot_token.clone() else {
@@ -42,6 +42,11 @@ async fn run_bot(state: SharedState, token: String, max_tokens: usize) -> anyhow
             debug!(user_id = %query.from.id, query = %query.query, "inline query received");
 
             let generator = GeneratorService::new(state.clone());
+            let inline_query_id = query.id.clone().0;
+            let user_id = i64::try_from(query.from.id.0).unwrap_or(-1);
+            let username = query.from.username.clone();
+            let chat_type = query.chat_type.as_ref().map(chat_type_as_str);
+
             let response = generator
                 .generate_text_for_prefix(query.query.clone(), max_tokens)
                 .await;
@@ -59,25 +64,41 @@ async fn run_bot(state: SharedState, token: String, max_tokens: usize) -> anyhow
                     ));
 
                     let article = InlineQueryResultArticle::new(
-                        format!("{}-0", query.id.clone().0),
+                        format!("{}-0", inline_query_id),
                         "Generated message",
                         content,
                     )
                     .description(preview(&reply_text, 128));
 
                     if let Err(err) = bot
-                        .answer_inline_query(query.id, vec![InlineQueryResult::Article(article)])
+                        .answer_inline_query(query.id.clone(), vec![InlineQueryResult::Article(article)])
                         .cache_time(0)
                         .send()
                         .await
                     {
                         warn!(error = ?err, "failed to answer inline query");
                     }
+
+                    if let Err(err) = db::log_inline_query(
+                        &state.pool,
+                        &inline_query_id,
+                        user_id,
+                        username.as_deref(),
+                        chat_type,
+                        &query.query,
+                        Some(&reply_text),
+                        true,
+                        None,
+                    )
+                    .await
+                    {
+                        warn!(error = ?err, "failed to log successful inline query");
+                    }
                 }
                 Err(err) => {
                     error!(error = ?err, "generation failed for inline query");
                     let article = InlineQueryResultArticle::new(
-                        format!("{}-err", query.id.clone().0),
+                        format!("{}-err", inline_query_id),
                         "Generation failed",
                         InputMessageContent::Text(InputMessageContentText::new(
                             "Generation failed. Try again later.",
@@ -86,13 +107,29 @@ async fn run_bot(state: SharedState, token: String, max_tokens: usize) -> anyhow
                     .description("Generation failed. Try again later.");
 
                     if let Err(send_err) = bot
-                        .answer_inline_query(query.id, vec![InlineQueryResult::Article(article)])
+                        .answer_inline_query(query.id.clone(), vec![InlineQueryResult::Article(article)])
                         .cache_time(0)
                         .is_personal(true)
                         .send()
                         .await
                     {
                         warn!(error = ?send_err, "failed to send error response for inline query");
+                    }
+
+                    if let Err(log_err) = db::log_inline_query(
+                        &state.pool,
+                        &inline_query_id,
+                        user_id,
+                        username.as_deref(),
+                        chat_type,
+                        &query.query,
+                        None,
+                        false,
+                        Some(&err.to_string()),
+                    )
+                    .await
+                    {
+                        warn!(error = ?log_err, "failed to log failed inline query");
                     }
                 }
             }
@@ -108,6 +145,16 @@ async fn run_bot(state: SharedState, token: String, max_tokens: usize) -> anyhow
         .await;
 
     Ok(())
+}
+
+fn chat_type_as_str(chat_type: &ChatType) -> &str {
+    match chat_type {
+        ChatType::Sender => "sender",
+        ChatType::Private => "private",
+        ChatType::Group => "group",
+        ChatType::Supergroup => "supergroup",
+        ChatType::Channel => "channel",
+    }
 }
 
 fn preview(text: &str, max_len: usize) -> String {

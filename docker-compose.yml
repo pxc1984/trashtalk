@@ -1,0 +1,23 @@
+services:
+  db:
+    image: postgres:18
+    env_file:
+      - .env
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./schema:/docker-entrypoint-initdb.d
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "50051:50051"
+    env_file:
+      - .env
+    depends_on:
+      - db
+    volumes:
+      - ./exports:/app/exports
+
+volumes:
+  db_data:

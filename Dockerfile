@@ -1,22 +1,62 @@
-FROM rust:1.64.0-buster AS builder
+# ------------------------------------------------------------
+# 1) Dependency build stage (cached)
+# ------------------------------------------------------------
+FROM rust:1.92.0-bullseye AS deps
 
-# install protobuf
-RUN apt-get update && apt-get install -y protobuf-compiler libprotobuf-dev
+RUN apt-get update && apt-get install -y \
+    protobuf-compiler \
+    libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY Cargo.toml build.rs /usr/src/app/
-COPY src /usr/src/app/src/
-COPY proto /usr/src/app/proto/
 WORKDIR /usr/src/app
-RUN rustup target add x86_64-unknown-linux-musl
-RUN cargo build --target x86_64-unknown-linux-musl --release --bin trashtalk
 
-FROM gcr.io/distroless/static-debian11 AS runner
+# Copy only manifest files
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY proto ./proto
 
-# get binary
-COPY --from=builder /usr/src/app/target/x86_64-unknown-linux-musl/release/trashtalk /
+# Create a dummy src to force dependency compilation
+RUN mkdir src \
+    && echo "fn main() {}" > src/main.rs
 
-# set run env
+# Build dependencies only
+RUN cargo build --release \
+    && rm -rf src
+
+
+# ------------------------------------------------------------
+# 2) Application build stage
+# ------------------------------------------------------------
+FROM rust:1.92.0-bullseye AS builder
+
+RUN apt-get update && apt-get install -y \
+    protobuf-compiler \
+    libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src/app
+
+# Reuse cached target and registry from deps stage
+COPY --from=deps /usr/src/app/target /usr/src/app/target
+COPY --from=deps /usr/local/cargo /usr/local/cargo
+
+# Copy real source code
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY src ./src
+COPY proto ./proto
+
+# Build the actual binary
+RUN cargo build --release --bin trashtalk
+
+
+# ------------------------------------------------------------
+# 3) Runtime stage
+# ------------------------------------------------------------
+FROM debian:11 AS runner
+
+WORKDIR /
+
+# Copy final binary only
+COPY --from=builder /usr/src/app/target/release/trashtalk /trashtalk
+
 EXPOSE 50051
-
-# run it
 CMD ["/trashtalk"]

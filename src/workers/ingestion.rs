@@ -18,6 +18,7 @@ pub fn spawn_ingestion_workers(state: SharedState, workers: usize) -> Vec<thread
         let worker_state = state.clone();
         let handle = thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("ingestion runtime");
+            let _guard = rt.enter();
             loop {
                 if let Err(err) = rt.block_on(run_ingestion_cycle(worker_state.clone())) {
                     error!(error = ?err, worker = idx, "ingestion cycle failed");

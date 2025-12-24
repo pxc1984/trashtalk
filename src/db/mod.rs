@@ -1,13 +1,15 @@
 use std::path::Path;
-
+use std::time::Duration;
 use anyhow::Context;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 
 use crate::tokenizer::tokens::{Token, TokenKind};
 
 pub async fn init_pool(database_url: &str) -> anyhow::Result<PgPool> {
-    PgPoolOptions::new()
-        .max_connections(10)
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(20)
+        .min_connections(5)
+        .acquire_timeout(Duration::from_secs(5))
         .connect(database_url)
         .await
         .context("failed to connect to PostgreSQL")

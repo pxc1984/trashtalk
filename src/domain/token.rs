@@ -18,6 +18,18 @@ pub struct Token {
     pub emoji_document_id: Option<String>,
 }
 
+/// A fragment of a raw message before tokenization. Produced by export/import
+/// adapters (e.g. Telegram chat export) and reduced to tokens by
+/// [`tokenize_fragments`].
+#[derive(Debug, Clone)]
+pub enum TextFragment {
+    Text(String),
+    CustomEmoji {
+        document_id: String,
+        text: Option<String>,
+    },
+}
+
 impl TokenKind {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -58,6 +70,23 @@ pub fn bos_token() -> Token {
 
 pub fn eos_token() -> Token {
     Token::new(TokenKind::Special, Some(EOS_TOKEN_VALUE.to_string()))
+}
+
+pub fn tokenize_fragments(fragments: &[TextFragment]) -> Vec<Token> {
+    let mut tokens = Vec::new();
+
+    for fragment in fragments {
+        match fragment {
+            TextFragment::Text(text) => tokens.extend(tokenize_text(text)),
+            TextFragment::CustomEmoji { document_id, text } => tokens.push(Token::custom_emoji(
+                document_id.clone(),
+                text.clone()
+                    .or_else(|| Some(format!("<emoji:{}>", document_id))),
+            )),
+        }
+    }
+
+    tokens
 }
 
 pub fn tokenize_text(text: &str) -> Vec<Token> {
@@ -118,4 +147,39 @@ pub fn tokenize_text(text: &str) -> Vec<Token> {
     }
 
     tokens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokenize_splits_words_and_punctuation() {
+        let tokens = tokenize_text("Привет, мир!");
+        let kinds: Vec<&str> = tokens.iter().map(|t| t.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["Word", "Punctuation", "Whitespace", "Word", "Punctuation"]
+        );
+        assert_eq!(tokens[0].value.as_deref(), Some("Привет"));
+        assert_eq!(tokens[3].value.as_deref(), Some("мир"));
+        assert_eq!(tokens[4].value.as_deref(), Some("!"));
+    }
+
+    #[test]
+    fn tokenize_handles_newlines() {
+        let tokens = tokenize_text("а\nб");
+        let kinds: Vec<&str> = tokens.iter().map(|t| t.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["Word", "Newline", "Word"]);
+    }
+
+    #[test]
+    fn custom_emoji_fragment_produces_emoji_token() {
+        let tokens = tokenize_fragments(&[TextFragment::CustomEmoji {
+            document_id: "123".to_string(),
+            text: None,
+        }]);
+        assert_eq!(tokens[0].kind, TokenKind::CustomEmoji);
+        assert_eq!(tokens[0].emoji_document_id.as_deref(), Some("123"));
+    }
 }

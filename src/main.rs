@@ -1,15 +1,16 @@
+mod application;
+mod bot;
 mod config;
-mod db;
-mod grpc;
+mod domain;
+mod infrastructure;
 mod state;
-mod tokenizer;
-mod trainer;
-mod workers;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use state::AppState;
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -24,21 +25,25 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = config::Config::from_env().context("loading configuration")?;
-    let pool = db::init_pool(&config.database_url)
+    let pool = infrastructure::db::init_pool(&config.database_url)
         .await
         .context("connecting to database")?;
 
-    db::apply_schema(&pool, std::path::Path::new("schema"))
+    infrastructure::db::apply_schema(&pool, std::path::Path::new("schema"))
         .await
         .context("applying local schema files")?;
 
     let state = Arc::new(AppState::new(config, pool));
 
     let _ingestion_handles =
-        workers::ingestion::spawn_ingestion_workers(state.clone(), state.config.ingestion_workers);
-    let _bot_handle = workers::telegram_bot::spawn_bot(state.clone());
+        infrastructure::ingestion::spawn_ingestion_workers(state.clone(), state.config.ingestion_workers);
+    let _bot_handle = bot::telegram_bot::spawn_bot(state.clone());
 
-    workers::grpc_server::run_server(state.clone())
-        .await
-        .context("running gRPC server")
+    info!("services started; keeping process alive");
+
+    // The bot runs in its own thread and the ingestion workers loop forever, so
+    // main only needs to stay alive.
+    loop {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+    }
 }

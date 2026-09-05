@@ -4,14 +4,7 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-#[derive(Debug, Clone)]
-pub enum TextFragment {
-    Text(String),
-    CustomEmoji {
-        document_id: String,
-        text: Option<String>,
-    },
-}
+use crate::domain::token::TextFragment;
 
 #[derive(Debug, Clone)]
 pub struct NormalizedMessage {
@@ -42,6 +35,7 @@ struct TelegramMessage {
     text: Option<serde_json::Value>,
 }
 
+/// Reads a Telegram chat export directory and normalizes its messages.
 pub fn read_export(export_dir: &Path) -> anyhow::Result<ParsedExport> {
     let content = std::fs::read_to_string(export_dir.join("result.json"))
         .with_context(|| format!("reading export file in {}", export_dir.display()))?;
@@ -97,14 +91,10 @@ pub fn read_export(export_dir: &Path) -> anyhow::Result<ParsedExport> {
 }
 
 fn parse_date(msg: &TelegramMessage) -> anyhow::Result<DateTime<Utc>> {
-    if let Some(unix) = msg
-        .date_unixtime
-        .as_deref()
-        .and_then(|v| v.parse::<i64>().ok())
+    if let Some(unix) = msg.date_unixtime.as_deref().and_then(|v| v.parse::<i64>().ok())
+        && let Some(dt) = DateTime::<Utc>::from_timestamp(unix, 0)
     {
-        if let Some(dt) = DateTime::<Utc>::from_timestamp(unix, 0) {
-            return Ok(dt);
-        }
+        return Ok(dt);
     }
 
     let parsed = DateTime::parse_from_rfc3339(&msg.date)

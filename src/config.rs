@@ -1,12 +1,21 @@
-use std::{env, net::SocketAddr, time::Duration};
+use std::{env, time::Duration};
 
 #[derive(Clone, Debug)]
 pub struct Config {
     pub database_url: String,
-    pub grpc_addr: SocketAddr,
     pub exports_dir: String,
     pub ngram_size: usize,
+    /// Lowest n-gram order used for backoff during generation.
+    pub min_ngram_size: usize,
     pub max_generation_length: usize,
+    pub generation_temperature: f32,
+    pub generation_top_k: usize,
+    pub generation_top_p: f32,
+    /// Down-weighting of tokens already present in the generated sequence.
+    pub repetition_penalty: f32,
+    /// Number of candidate continuations sampled and reranked (best-of-N).
+    pub num_candidates: usize,
+    pub min_generation_tokens: usize,
     pub ingestion_interval: Duration,
     pub ingestion_workers: usize,
     pub bot_token: Option<String>,
@@ -17,20 +26,43 @@ impl Config {
         let database_url = env::var("DATABASE_URL")
             .map_err(|_| anyhow::anyhow!("DATABASE_URL is required to connect to PostgreSQL"))?;
 
-        let grpc_addr: SocketAddr = env::var("GRPC_ADDR")
-            .unwrap_or_else(|_| "0.0.0.0:50051".to_string())
-            .parse()
-            .map_err(|_| anyhow::anyhow!("GRPC_ADDR must be a valid socket address"))?;
-
         let exports_dir = env::var("EXPORTS_DIR").unwrap_or_else(|_| "exports".to_string());
         let ngram_size = env::var("NGRAM_SIZE")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3);
+        let min_ngram_size = env::var("MIN_NGRAM_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
         let max_generation_length = env::var("MAX_GENERATION_LENGTH")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(64);
+        let generation_temperature: f32 = env::var("GENERATION_TEMPERATURE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.9);
+        let generation_top_k = env::var("GENERATION_TOP_K")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let generation_top_p: f32 = env::var("GENERATION_TOP_P")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.9);
+        let repetition_penalty: f32 = env::var("REPETITION_PENALTY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.3);
+        let num_candidates = env::var("NUM_CANDIDATES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
+        let min_generation_tokens = env::var("MIN_GENERATION_TOKENS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4);
         let ingestion_interval_secs = env::var("INGESTION_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -43,10 +75,16 @@ impl Config {
 
         Ok(Self {
             database_url,
-            grpc_addr,
             exports_dir,
             ngram_size: ngram_size.max(2),
+            min_ngram_size: min_ngram_size.clamp(2, ngram_size.max(2)),
             max_generation_length,
+            generation_temperature,
+            generation_top_k,
+            generation_top_p: generation_top_p.clamp(0.0, 1.0),
+            repetition_penalty: repetition_penalty.max(1.0),
+            num_candidates: num_candidates.max(1),
+            min_generation_tokens,
             ingestion_interval: Duration::from_secs(ingestion_interval_secs),
             ingestion_workers: ingestion_workers.max(1),
             bot_token,

@@ -9,7 +9,9 @@ use teloxide::{
 };
 use tracing::{debug, error, info, warn};
 
-use crate::{db, grpc::generator::GeneratorService, state::SharedState};
+use crate::application::generator::GeneratorService;
+use crate::infrastructure::db::inline_repository;
+use crate::state::SharedState;
 
 pub fn spawn_bot(state: SharedState) -> Option<thread::JoinHandle<()>> {
     let Some(token) = state.config.bot_token.clone() else {
@@ -79,7 +81,7 @@ async fn run_bot(state: SharedState, token: String, max_tokens: usize) -> anyhow
                         warn!(error = ?err, "failed to answer inline query");
                     }
 
-                    if let Err(err) = db::log_inline_query(
+                    if let Err(err) = inline_repository::log_inline_query(
                         &state.pool,
                         &inline_query_id,
                         user_id,
@@ -116,7 +118,7 @@ async fn run_bot(state: SharedState, token: String, max_tokens: usize) -> anyhow
                         warn!(error = ?send_err, "failed to send error response for inline query");
                     }
 
-                    if let Err(log_err) = db::log_inline_query(
+                    if let Err(log_err) = inline_repository::log_inline_query(
                         &state.pool,
                         &inline_query_id,
                         user_id,

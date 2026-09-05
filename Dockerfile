@@ -3,16 +3,10 @@
 # ------------------------------------------------------------
 FROM rust:1.92.0-bullseye AS deps
 
-RUN apt-get update && apt-get install -y \
-    protobuf-compiler \
-    libprotobuf-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /usr/src/app
 
 # Copy only manifest files
-COPY Cargo.toml Cargo.lock build.rs ./
-COPY proto ./proto
+COPY Cargo.toml Cargo.lock ./
 
 # Create a dummy src to force dependency compilation
 RUN mkdir src \
@@ -28,11 +22,6 @@ RUN cargo build --release \
 # ------------------------------------------------------------
 FROM rust:1.92.0-bullseye AS builder
 
-RUN apt-get update && apt-get install -y \
-    protobuf-compiler \
-    libprotobuf-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /usr/src/app
 
 # Reuse cached target and registry from deps stage
@@ -40,9 +29,8 @@ COPY --from=deps /usr/src/app/target /usr/src/app/target
 COPY --from=deps /usr/local/cargo /usr/local/cargo
 
 # Copy real source code
-COPY Cargo.toml Cargo.lock build.rs ./
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY proto ./proto
 
 # Build the actual binary
 RUN cargo build --release --bin trashtalk
@@ -61,5 +49,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # Copy final binary only
 COPY --from=builder /usr/src/app/target/release/trashtalk /trashtalk
 
-EXPOSE 50051
 CMD ["/trashtalk"]

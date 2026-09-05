@@ -18,6 +18,8 @@ pub struct Config {
     pub min_generation_tokens: usize,
     pub ingestion_interval: Duration,
     pub ingestion_workers: usize,
+    /// How often the main loop logs a liveness heartbeat.
+    pub heartbeat_interval: Duration,
     pub bot_token: Option<String>,
 }
 
@@ -71,6 +73,10 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
+        let heartbeat_interval_secs = env::var("HEARTBEAT_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
         let bot_token = env::var("BOT_TOKEN").ok();
 
         Ok(Self {
@@ -87,6 +93,7 @@ impl Config {
             min_generation_tokens,
             ingestion_interval: Duration::from_secs(ingestion_interval_secs),
             ingestion_workers: ingestion_workers.max(1),
+            heartbeat_interval: Duration::from_secs(heartbeat_interval_secs.max(5)),
             bot_token,
         })
     }

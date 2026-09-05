@@ -2,18 +2,11 @@ services:
   db:
     image: postgres:18-alpine
     restart: unless-stopped
-    ports:
-      - "5432:5432"
     env_file:
       - .env
     volumes:
-      - db_data:/var/lib/postgresql/data
+      - db_data:/var/lib/postgresql
       - ./schema:/docker-entrypoint-initdb.d
-  adminer:
-    image: adminer
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
   app:
     build:
       context: .

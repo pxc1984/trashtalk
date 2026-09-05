@@ -10,7 +10,6 @@ use teloxide::{
 use tracing::{debug, error, info, warn};
 
 use crate::application::generator::GeneratorService;
-use crate::infrastructure::db::inline_repository;
 use crate::state::SharedState;
 
 pub fn spawn_bot(state: SharedState) -> Option<thread::JoinHandle<()>> {
@@ -81,18 +80,19 @@ async fn run_bot(state: SharedState, token: String, max_tokens: usize) -> anyhow
                         warn!(error = ?err, "failed to answer inline query");
                     }
 
-                    if let Err(err) = inline_repository::log_inline_query(
-                        &state.pool,
-                        &inline_query_id,
-                        user_id,
-                        username.as_deref(),
-                        chat_type,
-                        &query.query,
-                        Some(&reply_text),
-                        true,
-                        None,
-                    )
-                    .await
+                    if let Err(err) = state
+                        .store
+                        .log_inline_query(
+                            &inline_query_id,
+                            user_id,
+                            username.as_deref(),
+                            chat_type,
+                            &query.query,
+                            Some(&reply_text),
+                            true,
+                            None,
+                        )
+                        .await
                     {
                         warn!(error = ?err, "failed to log successful inline query");
                     }
@@ -118,18 +118,19 @@ async fn run_bot(state: SharedState, token: String, max_tokens: usize) -> anyhow
                         warn!(error = ?send_err, "failed to send error response for inline query");
                     }
 
-                    if let Err(log_err) = inline_repository::log_inline_query(
-                        &state.pool,
-                        &inline_query_id,
-                        user_id,
-                        username.as_deref(),
-                        chat_type,
-                        &query.query,
-                        None,
-                        false,
-                        Some(&err.to_string()),
-                    )
-                    .await
+                    if let Err(log_err) = state
+                        .store
+                        .log_inline_query(
+                            &inline_query_id,
+                            user_id,
+                            username.as_deref(),
+                            chat_type,
+                            &query.query,
+                            None,
+                            false,
+                            Some(&err.to_string()),
+                        )
+                        .await
                     {
                         warn!(error = ?log_err, "failed to log failed inline query");
                     }

@@ -21,12 +21,23 @@ pub struct Config {
     /// How often the main loop logs a liveness heartbeat.
     pub heartbeat_interval: Duration,
     pub bot_token: Option<String>,
+    /// When true, all store data lives in the process's RAM instead of
+    /// PostgreSQL. Selected with `USE_INMEMORY_STORE=true`.
+    pub use_inmemory_store: bool,
 }
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        let database_url = env::var("DATABASE_URL")
-            .map_err(|_| anyhow::anyhow!("DATABASE_URL is required to connect to PostgreSQL"))?;
+        let use_inmemory_store = env::var("USE_INMEMORY_STORE")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false);
+
+        let database_url = if use_inmemory_store {
+            String::new()
+        } else {
+            env::var("DATABASE_URL")
+                .map_err(|_| anyhow::anyhow!("DATABASE_URL is required to connect to PostgreSQL"))?
+        };
 
         let exports_dir = env::var("EXPORTS_DIR").unwrap_or_else(|_| "exports".to_string());
         let ngram_size = env::var("NGRAM_SIZE")
@@ -95,6 +106,7 @@ impl Config {
             ingestion_workers: ingestion_workers.max(1),
             heartbeat_interval: Duration::from_secs(heartbeat_interval_secs.max(5)),
             bot_token,
+            use_inmemory_store,
         })
     }
 }

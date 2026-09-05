@@ -4,9 +4,6 @@ use tracing::{error, info, warn};
 
 use crate::application::trainer::update_ngrams;
 use crate::domain::token::{bos_token, eos_token, tokenize_fragments};
-use crate::infrastructure::db::{
-    message_repository, token_repository,
-};
 use crate::infrastructure::telegram_export::read_export;
 use crate::state::SharedState;
 
@@ -72,9 +69,7 @@ fn discover_exports(root: &str) -> anyhow::Result<Vec<PathBuf>> {
 async fn process_export(state: SharedState, export_dir: PathBuf) -> anyhow::Result<()> {
     let export_path = export_dir.to_string_lossy().to_string();
 
-    if let Some(status) =
-        message_repository::export_run_status(&state.pool, &export_path).await?
-    {
+    if let Some(status) = state.store.export_run_status(&export_path).await? {
         if status == "running" {
             warn!(export = %export_path, "ingestion already running for export");
             return Ok(());
@@ -85,47 +80,41 @@ async fn process_export(state: SharedState, export_dir: PathBuf) -> anyhow::Resu
         }
     }
 
-    let run_id = message_repository::start_ingestion_run(&state.pool, &export_path).await?;
+    let run_id = state.store.start_ingestion_run(&export_path).await?;
 
     let parsed = match read_export(&export_dir) {
         Ok(parsed) => parsed,
         Err(err) => {
-            message_repository::mark_ingestion_run_error(&state.pool, run_id, &err.to_string())
-                .await?;
+            state.store.mark_ingestion_run_error(run_id, &err.to_string()).await?;
             return Err(err);
         }
     };
-    message_repository::upsert_chat(&state.pool, &parsed).await?;
+    state.store.upsert_chat(&parsed).await?;
 
     let mut total_messages = 0i64;
     let mut total_tokens = 0i64;
 
     let process_result: anyhow::Result<()> = (|| async {
         for message in parsed.messages {
-            let raw_id =
-                message_repository::upsert_raw_message(&state.pool, &message, run_id).await?;
+            let raw_id = state.store.upsert_raw_message(&message, run_id).await?;
 
-            let message_id =
-                message_repository::upsert_message(&state.pool, &message, run_id, raw_id).await?;
+            let message_id = state.store.upsert_message(&message, run_id, raw_id).await?;
 
             let tokens = tokenize_fragments(&message.fragments);
             let mut token_ids = Vec::with_capacity(tokens.len());
 
             for (idx, token) in tokens.iter().enumerate() {
-                let token_id = token_repository::ensure_token(&state.pool, token).await?;
+                let token_id = state.store.ensure_token(token).await?;
                 token_ids.push(token_id);
 
-                message_repository::insert_message_token(
-                    &state.pool,
-                    message_id,
-                    idx as i32,
-                    token_id,
-                )
-                .await?;
+                state
+                    .store
+                    .insert_message_token(message_id, idx as i32, token_id)
+                    .await?;
             }
 
-            let bos_id = token_repository::ensure_token(&state.pool, &bos_token()).await?;
-            let eos_id = token_repository::ensure_token(&state.pool, &eos_token()).await?;
+            let bos_id = state.store.ensure_token(&bos_token()).await?;
+            let eos_id = state.store.ensure_token(&eos_token()).await?;
 
             let bos_padding = state.ngram_size.saturating_sub(1).max(1);
 
@@ -134,15 +123,15 @@ async fn process_export(state: SharedState, export_dir: PathBuf) -> anyhow::Resu
             training_ids.extend_from_slice(&token_ids);
             training_ids.push(eos_id);
 
-            update_ngrams(&state.pool, &training_ids, state.ngram_size, state.min_ngram_size)
-                .await?;
-
-            message_repository::upsert_ingestion_offset(
-                &state.pool,
-                message.chat_id,
-                message.message_id,
+            update_ngrams(
+                state.store.as_ref(),
+                &training_ids,
+                state.ngram_size,
+                state.min_ngram_size,
             )
             .await?;
+
+            state.store.upsert_ingestion_offset(message.chat_id, message.message_id).await?;
 
             total_messages += 1;
             total_tokens += token_ids.len() as i64;
@@ -152,12 +141,11 @@ async fn process_export(state: SharedState, export_dir: PathBuf) -> anyhow::Resu
     .await;
 
     if let Err(err) = process_result {
-        message_repository::mark_ingestion_run_error(&state.pool, run_id, &err.to_string()).await?;
+        state.store.mark_ingestion_run_error(run_id, &err.to_string()).await?;
         return Err(err);
     }
 
-    message_repository::complete_ingestion_run(&state.pool, run_id, total_messages, total_tokens)
-        .await?;
+    state.store.complete_ingestion_run(run_id, total_messages, total_tokens).await?;
 
     info!(
         export = %export_path,

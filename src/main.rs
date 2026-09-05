@@ -26,15 +26,25 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = config::Config::from_env().context("loading configuration")?;
-    let pool = infrastructure::db::init_pool(&config.database_url)
-        .await
-        .context("connecting to database")?;
 
-    infrastructure::db::apply_schema(&pool, std::path::Path::new("schema"))
-        .await
-        .context("applying local schema files")?;
+    let store: infrastructure::store::SharedStore = if config.use_inmemory_store {
+        info!("USE_INMEMORY_STORE=true; using in-memory (RAM) store");
+        Arc::new(infrastructure::store::Store::InMemory(
+            infrastructure::store::InMemoryStore::new(),
+        ))
+    } else {
+        let pool = infrastructure::db::init_pool(&config.database_url)
+            .await
+            .context("connecting to database")?;
 
-    let state = Arc::new(AppState::new(config, pool));
+        infrastructure::db::apply_schema(&pool, std::path::Path::new("schema"))
+            .await
+            .context("applying local schema files")?;
+
+        Arc::new(infrastructure::store::Store::Pg(infrastructure::store::PgStore::new(pool)))
+    };
+
+    let state = Arc::new(AppState::new(config, store));
 
     let ingestion_handles =
         infrastructure::ingestion::spawn_ingestion_workers(state.clone(), state.config.ingestion_workers);

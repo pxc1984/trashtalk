@@ -6,10 +6,7 @@ use tracing::{debug, info, warn};
 
 use crate::domain::generation::{GenerationParams, is_sentence_boundary_str, score_generation};
 use crate::domain::token::{TextFragment, bos_token, eos_token, tokenize_fragments};
-use crate::infrastructure::db::{
-    ngram_repository,
-    token_repository::{TokenRecord, ensure_token, fetch_token, fetch_tokens},
-};
+use crate::infrastructure::db::token_repository::TokenRecord;
 use crate::state::SharedState;
 
 /// Orchestrates text generation from the stored n-gram statistics.
@@ -46,8 +43,8 @@ impl GeneratorService {
         let params = self.generation_params();
         let num_candidates = self.state.config.num_candidates.max(1);
 
-        let bos_id = ensure_token(&self.state.pool, &bos_token()).await?;
-        let eos_id = ensure_token(&self.state.pool, &eos_token()).await?;
+        let bos_id = self.state.store.ensure_token(&bos_token()).await?;
+        let eos_id = self.state.store.ensure_token(&eos_token()).await?;
 
         let prefix_tokens = tokenize_fragments(&[TextFragment::Text(prefix)]);
 
@@ -58,7 +55,7 @@ impl GeneratorService {
         let mut base = Vec::with_capacity(prefix_tokens.len() + bos_padding);
         base.extend(std::iter::repeat_n(bos_id, bos_padding));
         for token in &prefix_tokens {
-            let id = ensure_token(&self.state.pool, token).await?;
+            let id = self.state.store.ensure_token(token).await?;
             base.push(id);
         }
 
@@ -139,7 +136,7 @@ impl GeneratorService {
     ) -> anyhow::Result<String> {
         debug!(token_count = token_ids.len(), "render_text called");
 
-        let records = fetch_tokens(&self.state.pool, token_ids).await?;
+        let records = self.state.store.fetch_tokens(token_ids).await?;
 
         let by_id: HashMap<i64, TokenRecord> = records.into_iter().map(|r| (r.id, r)).collect();
 
@@ -246,7 +243,7 @@ impl GeneratorService {
             debug!(order, prefix = ?prefix, "querying n-gram statistics");
 
             let candidates =
-                ngram_repository::query_next_candidates(&self.state.pool, order, prefix).await?;
+                self.state.store.query_next_candidates(order, prefix).await?;
 
             if candidates.is_empty() {
                 debug!(order, prefix = ?prefix, "no matches at this order, backing off");
@@ -262,7 +259,7 @@ impl GeneratorService {
 
     /// Whether the given token is a natural end-of-sentence marker.
     async fn is_boundary_token(&self, token_id: i64) -> anyhow::Result<bool> {
-        Ok(match fetch_token(&self.state.pool, token_id).await? {
+        Ok(match self.state.store.fetch_token(token_id).await? {
             Some(record) => {
                 is_sentence_boundary_str(&record.token_type, record.token_value.as_deref())
             }

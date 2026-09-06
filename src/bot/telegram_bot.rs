@@ -20,12 +20,23 @@ use crate::application::generator::GeneratorService;
 use crate::application::trainer::train_text;
 use crate::state::SharedState;
 
-/// Per-chat schedule: chat_id -> when the next random message is due.
-type BotChats = Arc<Mutex<HashMap<i64, Instant>>>;
+/// Per-chat schedule: when the bot joined the chat and when the next random
+/// message is due.
+struct ChatSchedule {
+    joined_at: Instant,
+    next_send_at: Instant,
+}
 
-/// Random-message interval bounds: 10 minutes to 12 hours.
+type BotChats = Arc<Mutex<HashMap<i64, ChatSchedule>>>;
+
+/// Steady-state random-message interval bounds: 10 minutes to 12 hours.
 const MIN_INTERVAL_SECS: u64 = 10 * 60;
 const MAX_INTERVAL_SECS: u64 = 12 * 60 * 60;
+/// Burst interval bounds for the first hour after the bot joins a chat: 1 to
+/// 10 minutes, before switching to the steady-state interval.
+const BURST_WINDOW: Duration = Duration::from_secs(60 * 60);
+const BURST_MIN_SECS: u64 = 60;
+const BURST_MAX_SECS: u64 = 10 * 60;
 
 pub fn spawn_bot(state: SharedState) -> Option<thread::JoinHandle<()>> {
     let Some(token) = state.config.bot_token.clone() else {
@@ -267,7 +278,8 @@ async fn handle_my_chat_member(
 }
 
 /// Periodically sends a random, chat-scoped message to every scheduled group,
-/// each on its own random interval of 10 minutes to 12 hours.
+/// each on its own random interval: 1–10 minutes for the first hour after the
+/// bot joins, then 10 minutes to 12 hours.
 async fn chat_message_loop(bot: Bot, state: SharedState, chats: BotChats) {
     let mut ticker = tokio::time::interval(Duration::from_secs(15));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -280,7 +292,7 @@ async fn chat_message_loop(bot: Bot, state: SharedState, chats: BotChats) {
             let guard = chats.lock().unwrap();
             guard
                 .iter()
-                .filter(|(_, next)| **next <= now)
+                .filter(|(_, s)| s.next_send_at <= now)
                 .map(|(id, _)| *id)
                 .collect()
         };
@@ -291,8 +303,8 @@ async fn chat_message_loop(bot: Bot, state: SharedState, chats: BotChats) {
             }
 
             let mut guard = chats.lock().unwrap();
-            if let Some(next) = guard.get_mut(&chat_id) {
-                *next = Instant::now() + random_interval();
+            if let Some(s) = guard.get_mut(&chat_id) {
+                s.next_send_at = Instant::now() + random_interval_for(s.joined_at);
             }
         }
     }
@@ -320,14 +332,24 @@ async fn send_random_message(bot: &Bot, state: &SharedState, chat_id: i64) -> an
 /// current random delay.
 fn register_chat(chats: &BotChats, chat_id: i64) {
     let mut guard = chats.lock().unwrap();
-    guard
-        .entry(chat_id)
-        .or_insert_with(|| Instant::now() + random_interval());
+    guard.entry(chat_id).or_insert_with(|| {
+        let now = Instant::now();
+        ChatSchedule {
+            joined_at: now,
+            next_send_at: now + random_interval_for(now),
+        }
+    });
 }
 
-/// A random delay between 10 minutes and 12 hours.
-fn random_interval() -> Duration {
-    let secs = rand::rng().random_range(MIN_INTERVAL_SECS..=MAX_INTERVAL_SECS);
+/// A random delay for a chat, picked from the burst interval (1–10 min) during
+/// its first hour and from the steady-state interval (10 min–12 h) afterwards.
+fn random_interval_for(joined_at: Instant) -> Duration {
+    let now = Instant::now();
+    let secs = if now.duration_since(joined_at) < BURST_WINDOW {
+        rand::rng().random_range(BURST_MIN_SECS..=BURST_MAX_SECS)
+    } else {
+        rand::rng().random_range(MIN_INTERVAL_SECS..=MAX_INTERVAL_SECS)
+    };
     Duration::from_secs(secs)
 }
 

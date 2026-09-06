@@ -14,6 +14,7 @@ pub fn spawn_ingestion_workers(state: SharedState, workers: usize) -> Vec<thread
     for idx in 0..worker_count {
         let worker_state = state.clone();
         let handle = thread::spawn(move || {
+            info!(worker = idx, "ingestion worker started");
             let rt = tokio::runtime::Runtime::new().expect("ingestion runtime");
             let _guard = rt.enter();
             loop {

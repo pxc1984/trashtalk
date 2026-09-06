@@ -9,14 +9,16 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use state::AppState;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     install_panic_hook();
+    debug!("panic hook installed");
 
     dotenvy::dotenv().ok();
+    debug!("loaded .env (if present)");
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -24,38 +26,64 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_target(false)
         .init();
+    info!("tracing initialized");
 
+    info!("stage: loading configuration");
     let config = config::Config::from_env().context("loading configuration")?;
+    debug!(
+        use_inmemory_store = config.use_inmemory_store,
+        database_url_set = !config.database_url.is_empty(),
+        "configuration loaded"
+    );
 
+    info!("stage: initializing store");
     let store: infrastructure::store::SharedStore = if config.use_inmemory_store {
         info!("USE_INMEMORY_STORE=true; using in-memory (RAM) store");
         Arc::new(infrastructure::store::Store::InMemory(
             infrastructure::store::InMemoryStore::new(),
         ))
     } else {
+        info!("stage: connecting to PostgreSQL");
         let pool = infrastructure::db::init_pool(&config.database_url)
             .await
             .context("connecting to database")?;
+        debug!("connected to PostgreSQL");
 
+        info!("stage: applying schema");
         infrastructure::db::apply_schema(&pool, std::path::Path::new("schema"))
             .await
             .context("applying local schema files")?;
+        debug!("schema applied");
 
         Arc::new(infrastructure::store::Store::Pg(infrastructure::store::PgStore::new(pool)))
     };
+    info!("store ready");
 
     let state = Arc::new(AppState::new(config, store));
+    debug!("app state created");
 
+    info!(
+        workers = state.config.ingestion_workers,
+        "stage: spawning ingestion workers"
+    );
     let ingestion_handles =
         infrastructure::ingestion::spawn_ingestion_workers(state.clone(), state.config.ingestion_workers);
-    let bot_handle = bot::telegram_bot::spawn_bot(state.clone());
+    debug!(count = ingestion_handles.len(), "ingestion workers spawned");
 
-    info!("services started; keeping process alive");
+    info!("stage: spawning Telegram bot");
+    let bot_handle = bot::telegram_bot::spawn_bot(state.clone());
+    debug!(
+        bot = if bot_handle.is_some() { "running" } else { "disabled" },
+        "bot startup done"
+    );
+
+    info!("stage: entering main keep-alive loop");
+    let heartbeat = state.config.heartbeat_interval;
+    debug!(?heartbeat, "keep-alive loop started");
 
     // Heartbeat: proves the process is alive and surfaces worker/bot threads
     // that silently died. Without it a code-0 exit or a dead worker thread
     // looks identical to "nothing happened".
-    let heartbeat = state.config.heartbeat_interval;
     loop {
         tokio::time::sleep(heartbeat).await;
 

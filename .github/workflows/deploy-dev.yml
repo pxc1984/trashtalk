@@ -26,6 +26,11 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Cache the compiled crate + target across runs so `cargo test` does not
+      # recompile the dependency tree on every push.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
       - name: Test
         run: cargo test --locked
 

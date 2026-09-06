@@ -1,5 +1,5 @@
 # ------------------------------------------------------------
-# 1) Dependency build stage (cached)
+# 1) Dependency build stage (warms the shared cargo cache)
 # ------------------------------------------------------------
 FROM rust:1.98-alpine AS deps
 
@@ -16,8 +16,12 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir src \
     && echo "fn main() {}" > src/main.rs
 
-# Build dependencies only
-RUN cargo build --release \
+# Build dependencies only. Cache mounts keep the compiled artifacts and the
+# crate registry across rebuilds, so changing the manifests no longer forces a
+# full recompile.
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-target,target=/usr/src/app/target \
+    cargo build --release --locked \
     && rm -rf src
 
 
@@ -30,16 +34,16 @@ WORKDIR /usr/src/app
 
 RUN apk add --no-cache build-base
 
-# Reuse cached target and registry from deps stage
-COPY --from=deps /usr/src/app/target /usr/src/app/target
-COPY --from=deps /usr/local/cargo /usr/local/cargo
-
-# Copy real source code
+# Real source code (manifests first so src-only edits reuse the deps cache)
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
-# Build the actual binary
-RUN cargo build --release --bin trashtalk
+# Build the binary, reusing the same target cache as the deps stage. Copy the
+# result out of the cache mount so it lands in the image layer for the runner.
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-target,target=/usr/src/app/target \
+    cargo build --release --bin trashtalk --locked \
+    && cp /usr/src/app/target/release/trashtalk /trashtalk
 
 
 # ------------------------------------------------------------
@@ -53,6 +57,6 @@ RUN apk add --no-cache ca-certificates \
     && rm -rf /var/cache/apk/*
 
 # Copy final binary only
-COPY --from=builder /usr/src/app/target/release/trashtalk /trashtalk
+COPY --from=builder /trashtalk /trashtalk
 
 CMD ["/trashtalk"]

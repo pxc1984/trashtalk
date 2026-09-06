@@ -42,16 +42,23 @@ impl PgStore {
         token_repository::fetch_tokens(&self.pool, ids).await
     }
 
-    pub async fn upsert_ngram(&self, n: usize, prefix: &[i64], next_token: i64) -> anyhow::Result<()> {
-        ngram_repository::upsert_ngram(&self.pool, n, prefix, next_token).await
+    pub async fn upsert_ngram(
+        &self,
+        chat_id: i64,
+        n: usize,
+        prefix: &[i64],
+        next_token: i64,
+    ) -> anyhow::Result<()> {
+        ngram_repository::upsert_ngram(&self.pool, chat_id, n, prefix, next_token).await
     }
 
     pub async fn query_next_candidates(
         &self,
+        chat_id: Option<i64>,
         n: usize,
         prefix: &[i64],
     ) -> anyhow::Result<Vec<NgramCandidate>> {
-        ngram_repository::query_next_candidates(&self.pool, n, prefix).await
+        ngram_repository::query_next_candidates(&self.pool, chat_id, n, prefix).await
     }
 
     pub async fn export_run_status(&self, export_path: &str) -> anyhow::Result<Option<String>> {

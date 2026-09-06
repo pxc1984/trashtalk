@@ -2,8 +2,8 @@ use std::{path::PathBuf, thread};
 
 use tracing::{error, info, warn};
 
-use crate::application::trainer::update_ngrams;
-use crate::domain::token::{bos_token, eos_token, tokenize_fragments};
+use crate::application::trainer::train_token_ids;
+use crate::domain::token::tokenize_fragments;
 use crate::infrastructure::telegram_export::read_export;
 use crate::state::SharedState;
 
@@ -113,19 +113,10 @@ async fn process_export(state: SharedState, export_dir: PathBuf) -> anyhow::Resu
                     .await?;
             }
 
-            let bos_id = state.store.ensure_token(&bos_token()).await?;
-            let eos_id = state.store.ensure_token(&eos_token()).await?;
-
-            let bos_padding = state.ngram_size.saturating_sub(1).max(1);
-
-            let mut training_ids = Vec::with_capacity(token_ids.len() + bos_padding + 1);
-            training_ids.extend(std::iter::repeat_n(bos_id, bos_padding));
-            training_ids.extend_from_slice(&token_ids);
-            training_ids.push(eos_id);
-
-            update_ngrams(
+            train_token_ids(
                 state.store.as_ref(),
-                &training_ids,
+                message.chat_id,
+                &token_ids,
                 state.ngram_size,
                 state.min_ngram_size,
             )

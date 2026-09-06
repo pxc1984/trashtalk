@@ -25,6 +25,9 @@ struct RunRecord {
     tokens: i64,
 }
 
+/// Per-chat n-gram statistics keyed `chat_id -> (n, prefix) -> next -> count`.
+type NgramMap = HashMap<i64, HashMap<(usize, Vec<i64>), HashMap<i64, i64>>>;
+
 /// All mutable state behind the store's lock.
 #[derive(Debug, Default)]
 struct Data {
@@ -33,7 +36,7 @@ struct Data {
     next_token_id: i64,
     emoji_ids: HashMap<String, i64>,
     next_emoji_id: i64,
-    ngrams: HashMap<(usize, Vec<i64>), HashMap<i64, i64>>,
+    ngrams: NgramMap,
     export_status: HashMap<String, String>,
     runs: HashMap<i64, RunRecord>,
     next_run_id: i64,
@@ -124,29 +127,48 @@ impl InMemoryStore {
             .collect())
     }
 
-    pub async fn upsert_ngram(&self, n: usize, prefix: &[i64], next_token: i64) -> anyhow::Result<()> {
+    pub async fn upsert_ngram(
+        &self,
+        chat_id: i64,
+        n: usize,
+        prefix: &[i64],
+        next_token: i64,
+    ) -> anyhow::Result<()> {
         let mut data = self.data.lock().unwrap();
-        let bucket = data.ngrams.entry((n, prefix.to_vec())).or_default();
+        let by_chat = data.ngrams.entry(chat_id).or_default();
+        let bucket = by_chat.entry((n, prefix.to_vec())).or_default();
         *bucket.entry(next_token).or_insert(0) += 1;
         Ok(())
     }
 
     pub async fn query_next_candidates(
         &self,
+        chat_id: Option<i64>,
         n: usize,
         prefix: &[i64],
     ) -> anyhow::Result<Vec<NgramCandidate>> {
         let data = self.data.lock().unwrap();
-        Ok(data
-            .ngrams
-            .get(&(n, prefix.to_vec()))
-            .map(|bucket| {
-                bucket
-                    .iter()
-                    .map(|(&token, &count)| (token, count))
-                    .collect()
-            })
-            .unwrap_or_default())
+        let key = (n, prefix.to_vec());
+        match chat_id {
+            Some(chat_id) => Ok(data
+                .ngrams
+                .get(&chat_id)
+                .and_then(|by_chat| by_chat.get(&key))
+                .map(|bucket| bucket.iter().map(|(&t, &c)| (t, c)).collect())
+                .unwrap_or_default()),
+            None => {
+                // Global fallback: merge counts across every chat.
+                let mut merged: HashMap<i64, i64> = HashMap::new();
+                for by_chat in data.ngrams.values() {
+                    if let Some(bucket) = by_chat.get(&key) {
+                        for (&token, &count) in bucket {
+                            *merged.entry(token).or_insert(0) += count;
+                        }
+                    }
+                }
+                Ok(merged.into_iter().collect())
+            }
+        }
     }
 
     pub async fn export_run_status(&self, export_path: &str) -> anyhow::Result<Option<String>> {
@@ -311,20 +333,35 @@ mod tests {
     #[tokio::test]
     pub async fn ngram_counts_accumulate_and_query_returns_candidates() {
         let s = store();
-        s.upsert_ngram(2, &[1], 2).await.unwrap();
-        s.upsert_ngram(2, &[1], 2).await.unwrap();
-        s.upsert_ngram(2, &[1], 3).await.unwrap();
+        s.upsert_ngram(7, 2, &[1], 2).await.unwrap();
+        s.upsert_ngram(7, 2, &[1], 2).await.unwrap();
+        s.upsert_ngram(7, 2, &[1], 3).await.unwrap();
 
-        let candidates = s.query_next_candidates(2, &[1]).await.unwrap();
+        let candidates = s.query_next_candidates(Some(7), 2, &[1]).await.unwrap();
         assert_eq!(candidates.len(), 2);
         let count_of_2 = candidates.iter().find(|(t, _)| *t == 2).unwrap().1;
         assert_eq!(count_of_2, 2);
     }
 
     #[tokio::test]
+    pub async fn ngrams_are_scoped_by_chat() {
+        let s = store();
+        s.upsert_ngram(1, 2, &[1], 2).await.unwrap();
+        s.upsert_ngram(2, 2, &[1], 3).await.unwrap();
+
+        // Each chat only sees its own continuation.
+        assert_eq!(s.query_next_candidates(Some(1), 2, &[1]).await.unwrap(), vec![(2, 1)]);
+        assert_eq!(s.query_next_candidates(Some(2), 2, &[1]).await.unwrap(), vec![(3, 1)]);
+
+        // Global (None) merges statistics across all chats.
+        let global = s.query_next_candidates(None, 2, &[1]).await.unwrap();
+        assert_eq!(global.len(), 2);
+    }
+
+    #[tokio::test]
     pub async fn unknown_prefix_returns_no_candidates() {
         let s = store();
-        assert!(s.query_next_candidates(2, &[99]).await.unwrap().is_empty());
+        assert!(s.query_next_candidates(Some(1), 2, &[99]).await.unwrap().is_empty());
     }
 
     #[tokio::test]

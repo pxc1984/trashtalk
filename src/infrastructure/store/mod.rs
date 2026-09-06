@@ -83,28 +83,33 @@ impl Store {
         Ok(self.fetch_tokens(&[id]).await?.into_iter().next())
     }
 
-    /// Increments the observed count for the transition `(n, prefix) -> next`.
+    /// Increments the observed count for the transition
+    /// `(chat_id, n, prefix) -> next`.
     pub async fn upsert_ngram(
         &self,
+        chat_id: i64,
         n: usize,
         prefix: &[i64],
         next_token: i64,
     ) -> anyhow::Result<()> {
         match self {
-            Store::Pg(s) => s.upsert_ngram(n, prefix, next_token).await,
-            Store::InMemory(s) => s.upsert_ngram(n, prefix, next_token).await,
+            Store::Pg(s) => s.upsert_ngram(chat_id, n, prefix, next_token).await,
+            Store::InMemory(s) => s.upsert_ngram(chat_id, n, prefix, next_token).await,
         }
     }
 
     /// Candidate continuations and their counts for a prefix at a given order.
+    /// `None` for `chat_id` queries across all chats; `Some(chat_id)` restricts
+    /// to that chat's statistics.
     pub async fn query_next_candidates(
         &self,
+        chat_id: Option<i64>,
         n: usize,
         prefix: &[i64],
     ) -> anyhow::Result<Vec<NgramCandidate>> {
         match self {
-            Store::Pg(s) => s.query_next_candidates(n, prefix).await,
-            Store::InMemory(s) => s.query_next_candidates(n, prefix).await,
+            Store::Pg(s) => s.query_next_candidates(chat_id, n, prefix).await,
+            Store::InMemory(s) => s.query_next_candidates(chat_id, n, prefix).await,
         }
     }
 

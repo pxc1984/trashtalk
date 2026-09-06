@@ -14,6 +14,10 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // stderr is unbuffered and always captured by Docker, so these markers
+    // survive even an abrupt exit that would lose buffered stdout.
+    eprintln!("[trashtalk] booting pid={}", std::process::id());
+
     install_panic_hook();
     debug!("panic hook installed");
 
@@ -24,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug")),
         )
+        .with_writer(std::io::stderr)
         .with_target(false)
         .init();
     info!("tracing initialized");
@@ -80,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
     info!("stage: entering main keep-alive loop");
     let heartbeat = state.config.heartbeat_interval;
     debug!(?heartbeat, "keep-alive loop started");
+    eprintln!("[trashtalk] entering keep-alive loop (pid={})", std::process::id());
 
     // Heartbeat: proves the process is alive and surfaces worker/bot threads
     // that silently died. Without it a code-0 exit or a dead worker thread

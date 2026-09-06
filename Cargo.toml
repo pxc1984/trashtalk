@@ -15,4 +15,6 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-segmentation = "1.13.3"
 dotenvy = "0.15.7"
 rand = "0.10.2"
-teloxide = "0.17.0"
+# Use rustls instead of the default native-tls/OpenSSL so the musl Docker
+# build needs no system OpenSSL (pure-Rust TLS).
+teloxide = { version = "0.17.0", default-features = false, features = ["rustls", "ctrlc_handler"] }

@@ -43,7 +43,7 @@ pub async fn apply_schema(pool: &PgPool, schema_dir: &Path) -> anyhow::Result<()
                 continue;
             }
 
-            sqlx::query(stmt)
+            sqlx::raw_sql(sqlx::AssertSqlSafe(stmt.to_string()))
                 .execute(pool)
                 .await
                 .with_context(|| format!("applying statement from {}", file.path().display()))?;

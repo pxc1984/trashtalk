@@ -5,7 +5,9 @@ pub struct Config {
     pub database_url: String,
     pub exports_dir: String,
     pub ngram_size: usize,
-    /// Lowest n-gram order used for backoff during generation.
+    /// Lowest n-gram order used for backoff during generation. Order 1
+    /// (unigram) is always available as a final fallback, so this only
+    /// controls the higher-order backoff depth.
     pub min_ngram_size: usize,
     pub max_generation_length: usize,
     pub generation_temperature: f32,
@@ -94,7 +96,7 @@ impl Config {
             database_url,
             exports_dir,
             ngram_size: ngram_size.max(2),
-            min_ngram_size: min_ngram_size.clamp(2, ngram_size.max(2)),
+            min_ngram_size: min_ngram_size.clamp(1, ngram_size.max(2)),
             max_generation_length,
             generation_temperature,
             generation_top_k,

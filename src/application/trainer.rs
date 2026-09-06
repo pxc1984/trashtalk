@@ -29,6 +29,12 @@ pub async fn train_token_ids(
     max_n: usize,
     min_n: usize,
 ) -> anyhow::Result<()> {
+    // Always keep order-1 (unigram) counts so generation can start from a
+    // single token or none at all, independent of NGRAM_SIZE / MIN_NGRAM_SIZE.
+    for &token_id in token_ids {
+        store.upsert_ngram(chat_id, 1, &[], token_id).await?;
+    }
+
     let bos_id = store.ensure_token(&bos_token()).await?;
     let eos_id = store.ensure_token(&eos_token()).await?;
     let padding = max_n.saturating_sub(1).max(1);

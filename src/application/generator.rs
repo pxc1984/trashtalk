@@ -228,6 +228,10 @@ impl GeneratorService {
     /// has no continuation for a prefix, it falls back to the global
     /// statistics (all chats). With no chat context, only global statistics
     /// are consulted.
+    ///
+    /// If no higher-order continuation exists, generation falls back to
+    /// order-1 (unigram), so it can start with a single token or none at all
+    /// regardless of NGRAM_SIZE / MIN_NGRAM_SIZE.
     async fn sample_next(
         &self,
         token_ids: &[i64],
@@ -247,21 +251,7 @@ impl GeneratorService {
 
             debug!(order, prefix = ?prefix, ?chat_id, "querying n-gram statistics");
 
-            let mut candidates = self
-                .state
-                .store
-                .query_next_candidates(chat_id, order, prefix)
-                .await?;
-
-            if chat_id.is_some() && candidates.is_empty() {
-                debug!(order, "no per-chat continuation, falling back to global statistics");
-                candidates = self
-                    .state
-                    .store
-                    .query_next_candidates(None, order, prefix)
-                    .await?;
-            }
-
+            let candidates = self.query_candidates(chat_id, order, prefix).await?;
             if candidates.is_empty() {
                 debug!(order, prefix = ?prefix, "no matches at this order, backing off");
                 continue;
@@ -271,7 +261,43 @@ impl GeneratorService {
             return Ok(Some(next));
         }
 
+        // Order-1 (unigram) fallback: lets generation start with a single token
+        // or none at all. When min_ngram_size is already 1, the loop above
+        // covers this order.
+        if self.state.min_ngram_size > 1 {
+            let candidates = self.query_candidates(chat_id, 1, &[]).await?;
+            if !candidates.is_empty() {
+                debug!("no higher-order continuation; falling back to unigram");
+                let next = sample_from_candidates(&candidates, &seen, &params)?;
+                return Ok(Some(next));
+            }
+        }
+
         Ok(None)
+    }
+
+    /// Queries candidates for a prefix, preferring `chat_id`'s statistics and
+    /// falling back to the global (all-chat) statistics when the chat has none.
+    async fn query_candidates(
+        &self,
+        chat_id: Option<i64>,
+        order: usize,
+        prefix: &[i64],
+    ) -> anyhow::Result<Vec<(i64, i64)>> {
+        let mut candidates = self
+            .state
+            .store
+            .query_next_candidates(chat_id, order, prefix)
+            .await?;
+        if chat_id.is_some() && candidates.is_empty() {
+            debug!(order, "no per-chat continuation, falling back to global statistics");
+            candidates = self
+                .state
+                .store
+                .query_next_candidates(None, order, prefix)
+                .await?;
+        }
+        Ok(candidates)
     }
 
     /// Whether the given token is a natural end-of-sentence marker.
@@ -376,6 +402,7 @@ fn sample_from_candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::trainer::train_text;
     use crate::config::Config;
     use crate::domain::generation::GenerationParams;
     use crate::domain::token::{Token, TokenKind};
@@ -499,6 +526,48 @@ mod tests {
             text.contains("мир"),
             "no-chat generation must use global statistics, got: {text:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn generation_can_start_from_zero_tokens_via_unigram() {
+        // Only unigram (order-1) data exists for chat 7 — no higher-order
+        // continuation. Generation must still start from an empty prefix by
+        // falling back to the unigram statistics.
+        let store = Store::InMemory(InMemoryStore::new());
+        store.ensure_token(&bos_token()).await.unwrap();
+        let hello_id = store
+            .ensure_token(&Token::new(TokenKind::Word, Some("привет".into())))
+            .await
+            .unwrap();
+        store.upsert_ngram(7, 1, &[], hello_id).await.unwrap();
+
+        let state = Arc::new(AppState::new(test_config(), Arc::new(store)));
+        let svc = GeneratorService::new(state);
+
+        let (text, generated) = svc
+            .generate_text_for_prefix(String::new(), 64, Some(7))
+            .await
+            .unwrap();
+        assert!(generated >= 1, "must generate from unigram fallback");
+        assert!(text.contains("привет"));
+    }
+
+    #[tokio::test]
+    async fn training_enables_generation_from_zero_tokens() {
+        // Training a message keeps unigram counts, which lets the model start
+        // a random message from an empty prefix.
+        let store = Store::InMemory(InMemoryStore::new());
+        train_text(&store, 7, "привет мир", 2, 2).await.unwrap();
+
+        let state = Arc::new(AppState::new(test_config(), Arc::new(store)));
+        let svc = GeneratorService::new(state);
+
+        let (text, generated) = svc
+            .generate_text_for_prefix(String::new(), 64, Some(7))
+            .await
+            .unwrap();
+        assert!(generated >= 1);
+        assert!(!text.trim().is_empty());
     }
 
     #[test]

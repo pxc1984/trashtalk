@@ -6,9 +6,10 @@ FROM rust:1.98-alpine AS deps
 WORKDIR /usr/src/app
 
 # Musl target needs a C toolchain to link (ring also compiles C/asm code);
-# openssl-dev provides the headers/pkg-config files needed by openssl-sys
-# (via teloxide -> reqwest -> native-tls).
-RUN apk add --no-cache build-base openssl-dev
+# openssl-dev provides headers/pkg-config files and openssl-static the static
+# libssl.a/libcrypto.a needed for the static musl link (via teloxide ->
+# reqwest -> native-tls -> openssl-sys).
+RUN apk add --no-cache build-base openssl-dev openssl-static
 
 # Copy only manifest files
 COPY Cargo.toml Cargo.lock ./
@@ -29,7 +30,7 @@ FROM rust:1.98-alpine AS builder
 
 WORKDIR /usr/src/app
 
-RUN apk add --no-cache build-base openssl-dev
+RUN apk add --no-cache build-base openssl-dev openssl-static
 
 # Reuse cached target and registry from deps stage
 COPY --from=deps /usr/src/app/target /usr/src/app/target

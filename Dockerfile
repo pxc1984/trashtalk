@@ -1,9 +1,12 @@
 # ------------------------------------------------------------
 # 1) Dependency build stage (cached)
 # ------------------------------------------------------------
-FROM rust:1.92.0-bullseye AS deps
+FROM rust:1.98-alpine AS deps
 
 WORKDIR /usr/src/app
+
+# Musl target needs a C toolchain to link (ring also compiles C/asm code).
+RUN apk add --no-cache build-base
 
 # Copy only manifest files
 COPY Cargo.toml Cargo.lock ./
@@ -20,9 +23,11 @@ RUN cargo build --release \
 # ------------------------------------------------------------
 # 2) Application build stage
 # ------------------------------------------------------------
-FROM rust:1.92.0-bullseye AS builder
+FROM rust:1.98-alpine AS builder
 
 WORKDIR /usr/src/app
+
+RUN apk add --no-cache build-base
 
 # Reuse cached target and registry from deps stage
 COPY --from=deps /usr/src/app/target /usr/src/app/target
@@ -39,12 +44,12 @@ RUN cargo build --release --bin trashtalk
 # ------------------------------------------------------------
 # 3) Runtime stage
 # ------------------------------------------------------------
-FROM debian:11 AS runner
+FROM alpine:3.24 AS runner
 
 WORKDIR /
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ca-certificates \
+    && rm -rf /var/cache/apk/*
 
 # Copy final binary only
 COPY --from=builder /usr/src/app/target/release/trashtalk /trashtalk

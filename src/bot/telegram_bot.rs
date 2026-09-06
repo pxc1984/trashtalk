@@ -11,7 +11,7 @@ use teloxide::{
     types::{
         Chat, ChatId, ChatKind, ChatMemberStatus, ChatMemberUpdated, ChatType, InlineQuery,
         InlineQueryResult, InlineQueryResultArticle, InputMessageContent, InputMessageContentText,
-        Message, PublicChatKind,
+        Message, PublicChatKind, ReplyParameters, UserId,
     },
 };
 use tracing::{debug, error, info, warn};
@@ -57,6 +57,8 @@ pub fn spawn_bot(state: SharedState) -> Option<thread::JoinHandle<()>> {
 async fn run_bot(state: SharedState, token: String, max_tokens: usize) -> anyhow::Result<()> {
     info!("starting Telegram bot");
     let bot = Bot::new(token);
+    // The bot's own user id, used to detect replies to its own messages.
+    let bot_id = bot.get_me().await?.id;
     let chats: BotChats = Arc::new(Mutex::new(HashMap::new()));
 
     let inline_handler = Update::filter_inline_query().endpoint({
@@ -70,10 +72,10 @@ async fn run_bot(state: SharedState, token: String, max_tokens: usize) -> anyhow
     let message_handler = Update::filter_message().endpoint({
         let state = state.clone();
         let chats = chats.clone();
-        move |_bot: Bot, msg: Message| {
+        move |bot: Bot, msg: Message| {
             let state = state.clone();
             let chats = chats.clone();
-            async move { handle_message(msg, state, chats).await }
+            async move { handle_message(bot, msg, state, chats, bot_id).await }
         }
     });
 
@@ -218,7 +220,13 @@ async fn handle_inline_query(
 /// Trains the model on a message received in a chat. With privacy mode off the
 /// bot sees every message, so each one is folded into that chat's n-gram
 /// statistics, keeping the model in sync with the conversations it watches.
-async fn handle_message(msg: Message, state: SharedState, chats: BotChats) -> ResponseResult<()> {
+async fn handle_message(
+    bot: Bot,
+    msg: Message,
+    state: SharedState,
+    chats: BotChats,
+    bot_id: UserId,
+) -> ResponseResult<()> {
     // Skip messages sent via an inline bot (the "via @cutalkbot" marker): these
     // are generated text, not something the model should learn from.
     if let Some(via) = &msg.via_bot {
@@ -239,6 +247,15 @@ async fn handle_message(msg: Message, state: SharedState, chats: BotChats) -> Re
     let text = text.trim();
     if text.is_empty() || text.starts_with('/') {
         return Ok(());
+    }
+
+    // If the message is a reply to the bot's own message, answer with a random,
+    // chat-scoped message.
+    if is_reply_to_bot(&msg, bot_id) {
+        debug!(chat_id, msg_id = msg.id.0, "reply to bot detected; replying with random message");
+        if let Err(err) = reply_randomly(&bot, &state, &msg, chat_id).await {
+            warn!(error = ?err, "failed to reply to bot's message");
+        }
     }
 
     debug!(chat_id, msg_id = msg.id.0, "training on chat message");
@@ -325,6 +342,39 @@ async fn send_random_message(bot: &Bot, state: &SharedState, chat_id: i64) -> an
 
     info!(chat_id, text = %text, "sending random chat message");
     bot.send_message(ChatId(chat_id), text).await?;
+    Ok(())
+}
+
+/// Whether this message is a reply to one of the bot's own messages.
+fn is_reply_to_bot(msg: &Message, bot_id: UserId) -> bool {
+    msg.reply_to_message()
+        .and_then(|replied| replied.from.as_ref())
+        .is_some_and(|from| from.id == bot_id)
+}
+
+/// Generates a random, chat-scoped message and posts it as a reply to `msg`.
+async fn reply_randomly(
+    bot: &Bot,
+    state: &SharedState,
+    msg: &Message,
+    chat_id: i64,
+) -> anyhow::Result<()> {
+    let generator = GeneratorService::new(state.clone());
+    let (text, _) = generator
+        .generate_text_for_prefix(String::new(), state.config.max_generation_length, Some(chat_id))
+        .await?;
+
+    let text = text.trim();
+    if text.is_empty() {
+        debug!(chat_id, "empty random reply, skipping send");
+        return Ok(());
+    }
+
+    info!(chat_id, text = %text, "replying to bot's message with random message");
+    bot.send_message(ChatId(chat_id), text)
+        .reply_parameters(ReplyParameters::new(msg.id))
+        .send()
+        .await?;
     Ok(())
 }
 

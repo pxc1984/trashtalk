@@ -18,6 +18,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::application::generator::GeneratorService;
 use crate::application::trainer::{train_sticker, train_text};
+use crate::config::Config;
 use crate::domain::token::{TextFragment, tokenize_fragments};
 use crate::state::SharedState;
 
@@ -274,11 +275,23 @@ async fn handle_message(
 
     // If the message is a reply to the bot's own message, answer with a
     // random, chat-scoped message. Otherwise, with a configurable probability
-    // (default 5%), answer any incoming message with a random one.
+    // (default 5%), answer any incoming message with a random one. Messages
+    // from the configured always-reply bot (default @cutalkshitbot) are always
+    // answered, regardless of the probability.
     if is_reply_to_bot(&msg, bot_id) {
         debug!(chat_id, msg_id = msg.id.0, "reply to bot detected; replying");
         if let Err(err) = reply_to_message(&bot, &state, &msg, chat_id).await {
             warn!(error = ?err, "failed to reply to bot's message");
+        }
+    } else if is_from_always_reply_bot(&msg, &state.config) {
+        debug!(
+            chat_id,
+            msg_id = msg.id.0,
+            bot = %state.config.always_reply_to_username,
+            "message from always-reply bot; replying"
+        );
+        if let Err(err) = reply_to_message(&bot, &state, &msg, chat_id).await {
+            warn!(error = ?err, "failed to reply to always-reply bot");
         }
     } else if rand::rng().random_bool(state.config.reply_chance) {
         debug!(
@@ -384,6 +397,17 @@ fn is_reply_to_bot(msg: &Message, bot_id: UserId) -> bool {
     msg.reply_to_message()
         .and_then(|replied| replied.from.as_ref())
         .is_some_and(|from| from.id == bot_id)
+}
+
+/// Whether the message was sent by the configured always-reply bot. When the
+/// configured username is empty the feature is disabled and this never holds.
+fn is_from_always_reply_bot(msg: &Message, config: &Config) -> bool {
+    !config.always_reply_to_username.is_empty()
+        && msg
+            .from
+            .as_ref()
+            .and_then(|from| from.username.as_deref())
+            .is_some_and(|name| name.eq_ignore_ascii_case(&config.always_reply_to_username))
 }
 
 /// Replies to an incoming message. With `STICKER_CHANCE` probability the reply

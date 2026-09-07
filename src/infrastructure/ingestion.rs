@@ -174,6 +174,7 @@ mod tests {
             num_candidates: 1,
             min_generation_tokens: 1,
             reply_chance: 0.0,
+            always_reply_to_username: String::new(),
             sticker_chance: 0.0,
             ingestion_interval: Duration::from_secs(3600),
             ingestion_workers: 1,

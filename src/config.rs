@@ -21,6 +21,10 @@ pub struct Config {
     /// Probability (0.0–1.0) of replying to an incoming message with a random,
     /// chat-scoped message. Default 5%.
     pub reply_chance: f64,
+    /// Username (without leading '@') of the bot whose every message is always
+    /// answered, regardless of `reply_chance`. Default "cutalkshitbot"; an
+    /// empty string disables the always-reply behavior.
+    pub always_reply_to_username: String,
     /// Probability (0.0–1.0) that a reply is a sticker (picked to fit the
     /// message) instead of generated text. Default 10%.
     pub sticker_chance: f64,
@@ -96,6 +100,12 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.05);
+        // Username (without '@') of a bot to always answer. Unset defaults to
+        // "cutalkshitbot"; an explicitly empty value disables the feature.
+        let always_reply_to_username = env::var("ALWAYS_REPLY_TO_USERNAME")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "cutalkshitbot".to_string());
         let sticker_chance: f64 = env::var("STICKER_CHANCE")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -127,6 +137,7 @@ impl Config {
             num_candidates: num_candidates.max(1),
             min_generation_tokens,
             reply_chance: reply_chance.clamp(0.0, 1.0),
+            always_reply_to_username,
             sticker_chance: sticker_chance.clamp(0.0, 1.0),
             ingestion_interval: Duration::from_secs(ingestion_interval_secs),
             ingestion_workers: ingestion_workers.max(1),

@@ -249,12 +249,23 @@ async fn handle_message(
         return Ok(());
     }
 
-    // If the message is a reply to the bot's own message, answer with a random,
-    // chat-scoped message.
+    // If the message is a reply to the bot's own message, answer with a
+    // random, chat-scoped message. Otherwise, with a configurable probability
+    // (default 5%), answer any incoming message with a random one.
     if is_reply_to_bot(&msg, bot_id) {
         debug!(chat_id, msg_id = msg.id.0, "reply to bot detected; replying with random message");
         if let Err(err) = reply_randomly(&bot, &state, &msg, chat_id).await {
             warn!(error = ?err, "failed to reply to bot's message");
+        }
+    } else if rand::rng().random_bool(state.config.reply_chance) {
+        debug!(
+            chat_id,
+            msg_id = msg.id.0,
+            chance = state.config.reply_chance,
+            "random reply chance hit"
+        );
+        if let Err(err) = reply_randomly(&bot, &state, &msg, chat_id).await {
+            warn!(error = ?err, "failed to send random reply");
         }
     }
 

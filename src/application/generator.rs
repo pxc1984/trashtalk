@@ -452,6 +452,7 @@ mod tests {
             num_candidates: 1,
             min_generation_tokens: 1,
             reply_chance: 0.0,
+            sticker_chance: 0.0,
             ingestion_interval: Duration::from_secs(3600),
             ingestion_workers: 1,
             heartbeat_interval: Duration::from_secs(3600),

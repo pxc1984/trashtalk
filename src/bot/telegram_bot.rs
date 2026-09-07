@@ -18,6 +18,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::application::generator::GeneratorService;
 use crate::application::trainer::{train_sticker, train_text};
+use crate::domain::token::{TextFragment, tokenize_fragments};
 use crate::state::SharedState;
 
 /// Per-chat schedule: when the bot joined the chat and when the next random
@@ -276,8 +277,8 @@ async fn handle_message(
     // random, chat-scoped message. Otherwise, with a configurable probability
     // (default 5%), answer any incoming message with a random one.
     if is_reply_to_bot(&msg, bot_id) {
-        debug!(chat_id, msg_id = msg.id.0, "reply to bot detected; replying with random message");
-        if let Err(err) = reply_randomly(&bot, &state, &msg, chat_id).await {
+        debug!(chat_id, msg_id = msg.id.0, "reply to bot detected; replying");
+        if let Err(err) = reply_to_message(&bot, &state, &msg, chat_id).await {
             warn!(error = ?err, "failed to reply to bot's message");
         }
     } else if rand::rng().random_bool(state.config.reply_chance) {
@@ -287,7 +288,7 @@ async fn handle_message(
             chance = state.config.reply_chance,
             "random reply chance hit"
         );
-        if let Err(err) = reply_randomly(&bot, &state, &msg, chat_id).await {
+        if let Err(err) = reply_to_message(&bot, &state, &msg, chat_id).await {
             warn!(error = ?err, "failed to send random reply");
         }
     }
@@ -384,6 +385,128 @@ fn is_reply_to_bot(msg: &Message, bot_id: UserId) -> bool {
     msg.reply_to_message()
         .and_then(|replied| replied.from.as_ref())
         .is_some_and(|from| from.id == bot_id)
+}
+
+/// Replies to an incoming message. With `STICKER_CHANCE` probability the reply
+/// is a sticker picked to fit the message; otherwise it is generated text.
+async fn reply_to_message(
+    bot: &Bot,
+    state: &SharedState,
+    msg: &Message,
+    chat_id: i64,
+) -> anyhow::Result<()> {
+    if rand::rng().random_bool(state.config.sticker_chance) {
+        let context = msg.text().unwrap_or_default();
+        if let Some(sticker) = pick_sticker_for_context(state, context, chat_id).await? {
+            info!(chat_id, sticker, "replying with a sticker fitted to the message");
+            return send_sticker(bot, chat_id, &sticker, Some(msg.id)).await;
+        }
+        debug!(chat_id, "no sticker available for this chat; falling back to text reply");
+    }
+    reply_randomly(bot, state, msg, chat_id).await
+}
+
+/// Picks a sticker that fits the incoming text by asking the n-gram model which
+/// sticker tokens follow similar wording in this chat (falling back to the
+/// global statistics), then to a random sticker from the chat's vocabulary.
+async fn pick_sticker_for_context(
+    state: &SharedState,
+    context: &str,
+    chat_id: i64,
+) -> anyhow::Result<Option<String>> {
+    let mut prefix_ids = Vec::new();
+    for token in tokenize_fragments(&[TextFragment::Text(context.to_string())]) {
+        prefix_ids.push(state.store.ensure_token(&token).await?);
+    }
+
+    let max_order = state.ngram_size.min(prefix_ids.len() + 1);
+    for order in (state.min_ngram_size..=max_order).rev() {
+        let prefix_len = order - 1;
+        if prefix_len > prefix_ids.len() {
+            continue;
+        }
+        let start = prefix_ids.len() - prefix_len;
+        if let Some(id) = pick_sticker_candidate(state, chat_id, order, &prefix_ids[start..]).await? {
+            return token_value_for(state, id).await;
+        }
+    }
+
+    pick_random_sticker(state, chat_id).await
+}
+
+/// Returns a sticker-token continuation id for the prefix, weighted by how
+/// often the chat follows it with each sticker (with a global fallback).
+async fn pick_sticker_candidate(
+    state: &SharedState,
+    chat_id: i64,
+    order: usize,
+    prefix: &[i64],
+) -> anyhow::Result<Option<i64>> {
+    let mut candidates = state.store.query_next_candidates(Some(chat_id), order, prefix).await?;
+    if candidates.is_empty() {
+        candidates = state.store.query_next_candidates(None, order, prefix).await?;
+    }
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let ids: Vec<i64> = candidates.iter().map(|(id, _)| *id).collect();
+    let records = state.store.fetch_tokens(&ids).await?;
+    let type_by_id: HashMap<i64, String> =
+        records.into_iter().map(|r| (r.id, r.token_type)).collect();
+
+    let stickers: Vec<(i64, i64)> = candidates
+        .into_iter()
+        .filter(|(id, _)| type_by_id.get(id).map(|t| t == "Sticker").unwrap_or(false))
+        .collect();
+
+    if stickers.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(pick_weighted(&stickers)))
+}
+
+/// Falls back to a random sticker from the chat's vocabulary (unigram stats).
+async fn pick_random_sticker(state: &SharedState, chat_id: i64) -> anyhow::Result<Option<String>> {
+    let mut candidates = state.store.query_next_candidates(Some(chat_id), 1, &[]).await?;
+    if candidates.is_empty() {
+        candidates = state.store.query_next_candidates(None, 1, &[]).await?;
+    }
+
+    let ids: Vec<i64> = candidates.iter().map(|(id, _)| *id).collect();
+    let records = state.store.fetch_tokens(&ids).await?;
+    let stickers: Vec<i64> = records
+        .into_iter()
+        .filter(|r| r.token_type == "Sticker")
+        .map(|r| r.id)
+        .collect();
+
+    if stickers.is_empty() {
+        return Ok(None);
+    }
+    let id = stickers[rand::rng().random_range(0..stickers.len())];
+    token_value_for(state, id).await
+}
+
+/// Resolves a token id to its stored value (the sticker's file path / file id).
+async fn token_value_for(state: &SharedState, id: i64) -> anyhow::Result<Option<String>> {
+    Ok(state.store.fetch_token(id).await?.and_then(|r| r.token_value))
+}
+
+/// Weighted random pick over `(id, count)` pairs, favoring higher counts.
+fn pick_weighted(items: &[(i64, i64)]) -> i64 {
+    let total: i64 = items.iter().map(|(_, c)| *c).sum();
+    if total <= 0 {
+        return items[0].0;
+    }
+    let mut r = rand::rng().random_range(0..total);
+    for (id, c) in items {
+        if r < *c {
+            return *id;
+        }
+        r -= *c;
+    }
+    items[items.len() - 1].0
 }
 
 /// Generates a random, chat-scoped message and posts it as a reply to `msg`.

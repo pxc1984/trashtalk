@@ -21,6 +21,9 @@ pub struct Config {
     /// Probability (0.0–1.0) of replying to an incoming message with a random,
     /// chat-scoped message. Default 5%.
     pub reply_chance: f64,
+    /// Probability (0.0–1.0) that a reply is a sticker (picked to fit the
+    /// message) instead of generated text. Default 10%.
+    pub sticker_chance: f64,
     pub ingestion_interval: Duration,
     pub ingestion_workers: usize,
     /// How often the main loop logs a liveness heartbeat.
@@ -85,6 +88,10 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.05);
+        let sticker_chance: f64 = env::var("STICKER_CHANCE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.10);
         let ingestion_interval_secs = env::var("INGESTION_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -112,6 +119,7 @@ impl Config {
             num_candidates: num_candidates.max(1),
             min_generation_tokens,
             reply_chance: reply_chance.clamp(0.0, 1.0),
+            sticker_chance: sticker_chance.clamp(0.0, 1.0),
             ingestion_interval: Duration::from_secs(ingestion_interval_secs),
             ingestion_workers: ingestion_workers.max(1),
             heartbeat_interval: Duration::from_secs(heartbeat_interval_secs.max(5)),

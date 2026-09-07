@@ -23,6 +23,16 @@ pub struct GeneratorService {
     state: SharedState,
 }
 
+/// The outcome of a generation run: the plain-text message to send plus any
+/// sticker media (file paths or `file_id`s) the model selected mid-chain.
+pub struct GeneratedOutput {
+    pub text: String,
+    pub stickers: Vec<String>,
+    /// Number of tokens generated beyond the prefix. Read by the unit tests.
+    #[allow(dead_code)]
+    pub generated: usize,
+}
+
 impl GeneratorService {
     pub fn new(state: SharedState) -> Self {
         Self { state }
@@ -36,7 +46,7 @@ impl GeneratorService {
         prefix: String,
         max_tokens: usize,
         chat_id: Option<i64>,
-    ) -> anyhow::Result<(String, usize)> {
+    ) -> anyhow::Result<GeneratedOutput> {
         info!(
             max_tokens,
             ?chat_id,
@@ -68,11 +78,11 @@ impl GeneratorService {
             .best_of_candidates(&base, chat_id, bos_id, eos_id, max_tokens, params, num_candidates)
             .await?;
 
-        let text = self.render_text(&best_ids, bos_id, eos_id).await?;
+        let (text, stickers) = self.render_output(&best_ids, bos_id, eos_id).await?;
 
-        info!(generated, final_len = text.len(), "text generation completed");
+        info!(generated, final_len = text.len(), sticker_count = stickers.len(), "text generation completed");
 
-        Ok((text, generated))
+        Ok(GeneratedOutput { text, stickers, generated })
     }
 
     fn generation_params(&self) -> GenerationParams {
@@ -110,7 +120,7 @@ impl GeneratorService {
                 .generate_from_model(&mut cand, chat_id, max_tokens, eos_id, params)
                 .await?;
 
-            let text = self.render_text(&cand, bos_id, eos_id).await?;
+            let text = self.render_output(&cand, bos_id, eos_id).await?.0;
             let is_truncated = generated >= max_tokens;
             let score = score_generation(&text, is_truncated);
 
@@ -126,19 +136,20 @@ impl GeneratorService {
         Ok((best_ids, best_generated))
     }
 
-    async fn render_text(
+    async fn render_output(
         &self,
         token_ids: &[i64],
         bos_id: i64,
         eos_id: i64,
-    ) -> anyhow::Result<String> {
-        debug!(token_count = token_ids.len(), "render_text called");
+    ) -> anyhow::Result<(String, Vec<String>)> {
+        debug!(token_count = token_ids.len(), "render_output called");
 
         let records = self.state.store.fetch_tokens(token_ids).await?;
 
         let by_id: HashMap<i64, TokenRecord> = records.into_iter().map(|r| (r.id, r)).collect();
 
         let mut text = String::new();
+        let mut stickers = Vec::new();
 
         for id in token_ids {
             if *id == bos_id {
@@ -172,6 +183,13 @@ impl GeneratorService {
                         text.push_str("[emoji]");
                     }
                 }
+                "Sticker" => {
+                    if let Some(path) = token.token_value.as_deref() {
+                        stickers.push(path.to_string());
+                    } else {
+                        warn!("sticker token missing its file path");
+                    }
+                }
                 "Special" => {} // skip BOS/EOS when rendering user-facing text
                 other => {
                     warn!(token_type = other, "unknown token type during rendering");
@@ -179,8 +197,8 @@ impl GeneratorService {
             }
         }
 
-        debug!(output_len = text.len(), "render_text completed");
-        Ok(text)
+        debug!(output_len = text.len(), sticker_count = stickers.len(), "render_output completed");
+        Ok((text, stickers))
     }
 
     /// Runs the autoregressive loop: backoff search over n-gram orders, then a
@@ -459,10 +477,11 @@ mod tests {
         let state = Arc::new(AppState::new(test_config(), Arc::new(store)));
         let svc = GeneratorService::new(state);
 
-        let (text, generated) = svc
+        let output = svc
             .generate_text_for_prefix("Привет".into(), 64, None)
             .await
             .unwrap();
+        let (text, generated) = (output.text, output.generated);
         assert_eq!(generated, 0);
         assert!(
             text.trim_start().starts_with("Привет"),
@@ -493,10 +512,11 @@ mod tests {
         let svc = GeneratorService::new(state);
 
         // BOS-padded base is [bos, Привет]; at order 2 the prefix is [Привет].
-        let (text, generated) = svc
+        let output = svc
             .generate_text_for_prefix("Привет".into(), 64, Some(7))
             .await
             .unwrap();
+        let (text, generated) = (output.text, output.generated);
         assert_eq!(generated, 1);
         assert!(
             text.contains("мир"),
@@ -518,10 +538,11 @@ mod tests {
         let svc = GeneratorService::new(state);
 
         // No chat context -> falls back to global statistics across all chats.
-        let (text, generated) = svc
+        let output = svc
             .generate_text_for_prefix("Привет".into(), 64, None)
             .await
             .unwrap();
+        let (text, generated) = (output.text, output.generated);
         assert_eq!(generated, 1);
         assert!(
             text.contains("мир"),
@@ -545,10 +566,11 @@ mod tests {
         let state = Arc::new(AppState::new(test_config(), Arc::new(store)));
         let svc = GeneratorService::new(state);
 
-        let (text, generated) = svc
+        let output = svc
             .generate_text_for_prefix(String::new(), 64, Some(7))
             .await
             .unwrap();
+        let (text, generated) = (output.text, output.generated);
         assert!(generated >= 1, "must generate from unigram fallback");
         assert!(text.contains("привет"));
     }
@@ -563,10 +585,11 @@ mod tests {
         let state = Arc::new(AppState::new(test_config(), Arc::new(store)));
         let svc = GeneratorService::new(state);
 
-        let (text, generated) = svc
+        let output = svc
             .generate_text_for_prefix(String::new(), 64, Some(7))
             .await
             .unwrap();
+        let (text, generated) = (output.text, output.generated);
         assert!(generated >= 1);
         assert!(!text.trim().is_empty());
     }

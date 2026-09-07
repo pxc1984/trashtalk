@@ -8,6 +8,7 @@ pub enum TokenKind {
     Whitespace,
     Newline,
     CustomEmoji,
+    Sticker,
     Special,
 }
 
@@ -28,6 +29,7 @@ pub enum TextFragment {
         document_id: String,
         text: Option<String>,
     },
+    Sticker { file: String },
 }
 
 impl TokenKind {
@@ -38,6 +40,7 @@ impl TokenKind {
             TokenKind::Whitespace => "Whitespace",
             TokenKind::Newline => "Newline",
             TokenKind::CustomEmoji => "CustomEmoji",
+            TokenKind::Sticker => "Sticker",
             TokenKind::Special => "Special",
         }
     }
@@ -57,6 +60,17 @@ impl Token {
             kind: TokenKind::CustomEmoji,
             value,
             emoji_document_id: Some(document_id),
+        }
+    }
+
+    /// A sticker token, keyed by the file that holds the sticker media (an
+    /// absolute path for exported stickers, or a Telegram `file_id` for
+    /// stickers seen live in a chat).
+    pub fn sticker(file: String) -> Self {
+        Self {
+            kind: TokenKind::Sticker,
+            value: Some(file),
+            emoji_document_id: None,
         }
     }
 }
@@ -83,6 +97,7 @@ pub fn tokenize_fragments(fragments: &[TextFragment]) -> Vec<Token> {
                 text.clone()
                     .or_else(|| Some(format!("<emoji:{}>", document_id))),
             )),
+            TextFragment::Sticker { file } => tokens.push(Token::sticker(file.clone())),
         }
     }
 
@@ -181,5 +196,15 @@ mod tests {
         }]);
         assert_eq!(tokens[0].kind, TokenKind::CustomEmoji);
         assert_eq!(tokens[0].emoji_document_id.as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn sticker_fragment_produces_sticker_token() {
+        let tokens = tokenize_fragments(&[TextFragment::Sticker {
+            file: "stickers/foo.webp".to_string(),
+        }]);
+        assert_eq!(tokens[0].kind, TokenKind::Sticker);
+        assert_eq!(tokens[0].value.as_deref(), Some("stickers/foo.webp"));
+        assert_eq!(tokens[0].kind.as_str(), "Sticker");
     }
 }

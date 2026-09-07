@@ -20,6 +20,26 @@ pub async fn train_text(
     train_token_ids(store, chat_id, &token_ids, max_n, min_n).await
 }
 
+/// Tokenizes a sticker (its media file) and records its n-gram statistics,
+/// scoped to `chat_id`, so the model learns when the chat uses stickers.
+pub async fn train_sticker(
+    store: &Store,
+    chat_id: i64,
+    file: &str,
+    max_n: usize,
+    min_n: usize,
+) -> anyhow::Result<()> {
+    let tokens = tokenize_fragments(&[TextFragment::Sticker {
+        file: file.to_string(),
+    }]);
+    let mut token_ids = Vec::with_capacity(tokens.len());
+    for token in &tokens {
+        let id = store.ensure_token(token).await?;
+        token_ids.push(id);
+    }
+    train_token_ids(store, chat_id, &token_ids, max_n, min_n).await
+}
+
 /// Wraps `token_ids` with BOS/EOS padding and records n-gram statistics for
 /// the chat.
 pub async fn train_token_ids(

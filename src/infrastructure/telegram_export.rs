@@ -33,6 +33,11 @@ struct TelegramMessage {
     date: String,
     date_unixtime: Option<String>,
     text: Option<serde_json::Value>,
+    /// Media path for a sticker, relative to the export directory. Some
+    /// exports call it `document_id`; the standard field name is `file`.
+    file: Option<String>,
+    #[serde(rename = "document_id")]
+    document_id: Option<String>,
 }
 
 /// Reads a Telegram chat export directory and normalizes its messages.
@@ -65,12 +70,15 @@ pub fn read_export(export_dir: &Path) -> anyhow::Result<ParsedExport> {
             Err(_) => continue,
         };
 
-        if msg.message_type != "message" {
+        if !matches!(msg.message_type.as_str(), "message" | "sticker") {
             continue;
         }
 
         let sent_at = parse_date(&msg).unwrap_or_else(|_| Utc::now());
-        let fragments = fragments_from_text(&msg.text);
+        let fragments = match msg.message_type.as_str() {
+            "sticker" => sticker_fragments(export_dir, msg.file.as_ref().or(msg.document_id.as_ref())),
+            _ => fragments_from_text(&msg.text),
+        };
 
         normalized.push(NormalizedMessage {
             chat_id,
@@ -134,5 +142,54 @@ fn fragments_from_text(text: &Option<serde_json::Value>) -> Vec<TextFragment> {
             })
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+/// A sticker message becomes a single sticker fragment carrying the absolute
+/// path of its media file. Telegram exports store the path relative to the
+/// export directory, so it is resolved against `export_dir` here; the bot can
+/// then send the sticker as a file.
+fn sticker_fragments(export_dir: &Path, file: Option<&String>) -> Vec<TextFragment> {
+    match file {
+        Some(f) if !f.trim().is_empty() => vec![TextFragment::Sticker {
+            file: export_dir.join(f).to_string_lossy().to_string(),
+        }],
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sticker_message_produces_sticker_fragment() {
+        let dir = std::env::temp_dir().join(format!("trashtalk_export_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let json = r#"{
+            "id": 1,
+            "name": "Test",
+            "type": "personal_chat",
+            "messages": [
+                {"id": 1, "type": "message", "date": "2024-01-01 10:00:00", "from_id": "u1", "text": "hi"},
+                {"id": 2, "type": "sticker", "date": "2024-01-01 10:01:00", "from_id": "u1", "sticker_emoji": "😂", "file": "stickers/s.webp"}
+            ]
+        }"#;
+        std::fs::write(dir.join("result.json"), json).unwrap();
+
+        let parsed = read_export(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(parsed.messages.len(), 2);
+        // The relative path is resolved against the export directory.
+        assert!(matches!(
+            parsed.messages[1].fragments.as_slice(),
+            [TextFragment::Sticker { file }] if file.ends_with("stickers/s.webp")
+        ));
+        // Text messages are untouched.
+        assert!(matches!(
+            parsed.messages[0].fragments.as_slice(),
+            [TextFragment::Text(s)] if s == "hi"
+        ));
     }
 }

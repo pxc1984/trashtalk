@@ -9,15 +9,15 @@ use rand::RngExt;
 use teloxide::{
     prelude::*,
     types::{
-        Chat, ChatId, ChatKind, ChatMemberStatus, ChatMemberUpdated, ChatType, InlineQuery,
-        InlineQueryResult, InlineQueryResultArticle, InputMessageContent, InputMessageContentText,
-        Message, PublicChatKind, ReplyParameters, UserId,
+        Chat, ChatId, ChatKind, ChatMemberStatus, ChatMemberUpdated, ChatType, FileId, InlineQuery,
+        InlineQueryResult, InlineQueryResultArticle, InputFile, InputMessageContent,
+        InputMessageContentText, Message, MessageId, PublicChatKind, ReplyParameters, UserId,
     },
 };
 use tracing::{debug, error, info, warn};
 
 use crate::application::generator::GeneratorService;
-use crate::application::trainer::train_text;
+use crate::application::trainer::{train_sticker, train_text};
 use crate::state::SharedState;
 
 /// Per-chat schedule: when the bot joined the chat and when the next random
@@ -130,11 +130,13 @@ async fn handle_inline_query(
         .await;
 
     match response {
-        Ok((text, _)) => {
-            let reply_text = if text.trim().is_empty() {
+        Ok(output) => {
+            // Inline results are text-only; sticker media (if any) is not
+            // sendable through answer_inline_query, so only the text is used.
+            let reply_text = if output.text.trim().is_empty() {
                 "Could not generate text for this prompt.".to_string()
             } else {
-                text
+                output.text
             };
 
             let content = InputMessageContent::Text(InputMessageContentText::new(
@@ -241,6 +243,27 @@ async fn handle_message(
         register_chat(&chats, chat_id);
     }
 
+    // Learn from sticker messages too: the chat's own sticker usage becomes
+    // part of the model, so generation can emit the same stickers back. A live
+    // sticker carries a Telegram `file_id` we can re-send directly.
+    if let Some(sticker) = msg.sticker() {
+        let file_id = sticker.file.id.0.clone();
+        if !file_id.trim().is_empty() {
+            debug!(chat_id, msg_id = msg.id.0, file_id = %file_id, "training on chat sticker");
+            if let Err(err) = train_sticker(
+                &state.store,
+                chat_id,
+                &file_id,
+                state.ngram_size,
+                state.min_ngram_size,
+            )
+            .await
+            {
+                warn!(error = ?err, "failed to train on chat sticker");
+            }
+        }
+    }
+
     let Some(text) = msg.text() else {
         return Ok(());
     };
@@ -341,18 +364,18 @@ async fn chat_message_loop(bot: Bot, state: SharedState, chats: BotChats) {
 /// Generates a random message from a chat's own model and posts it to the chat.
 async fn send_random_message(bot: &Bot, state: &SharedState, chat_id: i64) -> anyhow::Result<()> {
     let generator = GeneratorService::new(state.clone());
-    let (text, _) = generator
+    let output = generator
         .generate_text_for_prefix(String::new(), state.config.max_generation_length, Some(chat_id))
         .await?;
 
-    let text = text.trim();
-    if text.is_empty() {
-        debug!(chat_id, "empty random message, skipping send");
-        return Ok(());
+    if !output.text.trim().is_empty() {
+        info!(chat_id, text = %output.text, "sending random chat message");
+        bot.send_message(ChatId(chat_id), output.text).await?;
     }
 
-    info!(chat_id, text = %text, "sending random chat message");
-    bot.send_message(ChatId(chat_id), text).await?;
+    for sticker in &output.stickers {
+        send_sticker(bot, chat_id, sticker, None).await?;
+    }
     Ok(())
 }
 
@@ -371,21 +394,49 @@ async fn reply_randomly(
     chat_id: i64,
 ) -> anyhow::Result<()> {
     let generator = GeneratorService::new(state.clone());
-    let (text, _) = generator
+    let output = generator
         .generate_text_for_prefix(String::new(), state.config.max_generation_length, Some(chat_id))
         .await?;
 
-    let text = text.trim();
-    if text.is_empty() {
-        debug!(chat_id, "empty random reply, skipping send");
+    if !output.text.trim().is_empty() {
+        info!(chat_id, text = %output.text, "replying with random message");
+        bot.send_message(ChatId(chat_id), output.text)
+            .reply_parameters(ReplyParameters::new(msg.id))
+            .send()
+            .await?;
+    }
+
+    for sticker in &output.stickers {
+        send_sticker(bot, chat_id, sticker, Some(msg.id)).await?;
+    }
+    Ok(())
+}
+
+/// Sends a sticker from a media source. `source` is either an absolute file
+/// path on disk (from an export) or a Telegram `file_id` (from a live sticker);
+/// an existing path is sent as a file, anything else as a file id.
+async fn send_sticker(
+    bot: &Bot,
+    chat_id: i64,
+    source: &str,
+    reply_to: Option<MessageId>,
+) -> anyhow::Result<()> {
+    if source.trim().is_empty() {
         return Ok(());
     }
 
-    info!(chat_id, text = %text, "replying to bot's message with random message");
-    bot.send_message(ChatId(chat_id), text)
-        .reply_parameters(ReplyParameters::new(msg.id))
-        .send()
-        .await?;
+    let input = if std::path::Path::new(source).exists() {
+        InputFile::file(source)
+    } else {
+        InputFile::file_id(FileId(source.to_string()))
+    };
+
+    info!(chat_id, source, "sending sticker");
+    let mut request = bot.send_sticker(ChatId(chat_id), input);
+    if let Some(id) = reply_to {
+        request = request.reply_parameters(ReplyParameters::new(id));
+    }
+    request.send().await?;
     Ok(())
 }
 

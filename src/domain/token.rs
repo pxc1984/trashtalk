@@ -22,7 +22,7 @@ pub struct Token {
 /// A fragment of a raw message before tokenization. Produced by export/import
 /// adapters (e.g. Telegram chat export) and reduced to tokens by
 /// [`tokenize_fragments`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TextFragment {
     Text(String),
     CustomEmoji {

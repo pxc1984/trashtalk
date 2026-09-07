@@ -1,4 +1,3 @@
-pub mod emoji_repository;
 pub mod inline_repository;
 pub mod message_repository;
 pub mod ngram_repository;

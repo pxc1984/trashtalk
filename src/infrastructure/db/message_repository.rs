@@ -1,6 +1,7 @@
 use chrono::Utc;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
+use crate::domain::token::TextFragment;
 use crate::infrastructure::telegram_export::{NormalizedMessage, ParsedExport};
 
 /// Returns the status of the latest ingestion run for an export path,
@@ -109,18 +110,20 @@ pub async fn upsert_raw_message(
     .await?)
 }
 
-/// Upserts a normalized message and returns its id.
+/// Upserts a normalized message and returns its id. The normalized fragments
+/// are persisted so the in-memory cache can be rebuilt from history later.
 pub async fn upsert_message(
     pool: &PgPool,
     msg: &NormalizedMessage,
     ingestion_run_id: i64,
     raw_message_id: i64,
 ) -> anyhow::Result<i64> {
+    let fragments = serde_json::to_value(&msg.fragments)?;
     Ok(sqlx::query_scalar::<_, i64>(
-        r#"INSERT INTO messages (chat_id, message_id, from_id, sent_at, ingestion_run_id, raw_message_id)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        r#"INSERT INTO messages (chat_id, message_id, from_id, sent_at, ingestion_run_id, raw_message_id, fragments)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (chat_id, message_id)
-        DO UPDATE SET sent_at = EXCLUDED.sent_at, from_id = EXCLUDED.from_id, ingestion_run_id = EXCLUDED.ingestion_run_id, raw_message_id = EXCLUDED.raw_message_id
+        DO UPDATE SET sent_at = EXCLUDED.sent_at, from_id = EXCLUDED.from_id, ingestion_run_id = EXCLUDED.ingestion_run_id, raw_message_id = EXCLUDED.raw_message_id, fragments = EXCLUDED.fragments
         RETURNING id"#,
     )
     .bind(msg.chat_id)
@@ -129,27 +132,9 @@ pub async fn upsert_message(
     .bind(msg.sent_at)
     .bind(ingestion_run_id)
     .bind(raw_message_id)
+    .bind(fragments)
     .fetch_one(pool)
     .await?)
-}
-
-pub async fn insert_message_token(
-    pool: &PgPool,
-    message_id: i64,
-    position: i32,
-    token_id: i64,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"INSERT INTO message_tokens (message_id, position, token_id)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (message_id, position) DO NOTHING"#,
-    )
-    .bind(message_id)
-    .bind(position)
-    .bind(token_id)
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
 /// Advances the high-water mark of the last ingested message per chat.
@@ -168,4 +153,28 @@ pub async fn upsert_ingestion_offset(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// A stored message's content, enough to rebuild the in-memory cache: which
+/// chat it belongs to and its normalized fragments.
+pub struct StoredMessage {
+    pub chat_id: i64,
+    pub fragments: Vec<TextFragment>,
+}
+
+/// Reads every message's fragments from the history so the in-memory token and
+/// n-gram cache can be rebuilt on startup.
+pub async fn fetch_messages_for_rebuild(pool: &PgPool) -> anyhow::Result<Vec<StoredMessage>> {
+    let rows = sqlx::query("SELECT chat_id, fragments FROM messages WHERE fragments IS NOT NULL")
+        .fetch_all(pool)
+        .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let chat_id: i64 = row.try_get("chat_id")?;
+        let fragments: serde_json::Value = row.try_get("fragments")?;
+        let fragments: Vec<TextFragment> = serde_json::from_value(fragments)?;
+        out.push(StoredMessage { chat_id, fragments });
+    }
+    Ok(out)
 }

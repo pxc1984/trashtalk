@@ -6,7 +6,12 @@ pub use pg::PgStore;
 
 use std::sync::Arc;
 
-use crate::domain::token::{Token, TokenKind};
+use sqlx::PgPool;
+use tracing::info;
+
+use crate::application::trainer::train_token_ids;
+use crate::domain::token::{tokenize_fragments, Token, TokenKind};
+use crate::infrastructure::db::message_repository::StoredMessage;
 use crate::infrastructure::db::ngram_repository::NgramCandidate;
 use crate::infrastructure::db::token_repository::TokenRecord;
 use crate::infrastructure::telegram_export::{NormalizedMessage, ParsedExport};
@@ -15,17 +20,36 @@ use crate::infrastructure::telegram_export::{NormalizedMessage, ParsedExport};
 /// the ingestion/bookkeeping rows.
 ///
 /// Two backends exist:
-/// - [`Store::Pg`] — PostgreSQL, the default. Durable and shared.
 /// - [`Store::InMemory`] — everything lives in the process's RAM, selected with
 ///   `USE_INMEMORY_STORE=true`. Fast to start, no schema, but all data is lost
 ///   on shutdown.
+/// - [`Store::Hybrid`] — the DB-backed default. Message history is durable in
+///   PostgreSQL, while the token vocabulary and n-gram statistics live in the
+///   in-memory cache and are rebuilt from that history on startup (they are
+///   cheap to recompute).
 ///
 /// The enum is always shared behind [`SharedStore`] (`Arc`), never moved by
 /// value, so the size of the largest variant is irrelevant.
 #[allow(clippy::large_enum_variant)]
 pub enum Store {
-    Pg(PgStore),
     InMemory(InMemoryStore),
+    Hybrid(HybridStore),
+}
+
+/// A `PgStore` (durable history) combined with an `InMemoryStore` (recomputed
+/// token/n-gram cache).
+pub struct HybridStore {
+    pg: PgStore,
+    cache: InMemoryStore,
+}
+
+impl HybridStore {
+    pub fn new(pool: PgPool) -> Self {
+        Self {
+            pg: PgStore::new(pool),
+            cache: InMemoryStore::new(),
+        }
+    }
 }
 
 impl Store {
@@ -37,8 +61,8 @@ impl Store {
         description: Option<&str>,
     ) -> anyhow::Result<i64> {
         match self {
-            Store::Pg(s) => s.ensure_custom_emoji(document_id, emoji_code, description).await,
             Store::InMemory(s) => s.ensure_custom_emoji(document_id, emoji_code, description).await,
+            Store::Hybrid(h) => h.cache.ensure_custom_emoji(document_id, emoji_code, description).await,
         }
     }
 
@@ -65,16 +89,16 @@ impl Store {
         emoji_id: Option<i64>,
     ) -> anyhow::Result<i64> {
         match self {
-            Store::Pg(s) => s.ensure_token_record(token_type, token_value, emoji_id).await,
             Store::InMemory(s) => s.ensure_token_record(token_type, token_value, emoji_id).await,
+            Store::Hybrid(h) => h.cache.ensure_token_record(token_type, token_value, emoji_id).await,
         }
     }
 
     /// Returns the full records for the given token ids.
     pub async fn fetch_tokens(&self, ids: &[i64]) -> anyhow::Result<Vec<TokenRecord>> {
         match self {
-            Store::Pg(s) => s.fetch_tokens(ids).await,
             Store::InMemory(s) => s.fetch_tokens(ids).await,
+            Store::Hybrid(h) => h.cache.fetch_tokens(ids).await,
         }
     }
 
@@ -93,8 +117,8 @@ impl Store {
         next_token: i64,
     ) -> anyhow::Result<()> {
         match self {
-            Store::Pg(s) => s.upsert_ngram(chat_id, n, prefix, next_token).await,
             Store::InMemory(s) => s.upsert_ngram(chat_id, n, prefix, next_token).await,
+            Store::Hybrid(h) => h.cache.upsert_ngram(chat_id, n, prefix, next_token).await,
         }
     }
 
@@ -108,23 +132,23 @@ impl Store {
         prefix: &[i64],
     ) -> anyhow::Result<Vec<NgramCandidate>> {
         match self {
-            Store::Pg(s) => s.query_next_candidates(chat_id, n, prefix).await,
             Store::InMemory(s) => s.query_next_candidates(chat_id, n, prefix).await,
+            Store::Hybrid(h) => h.cache.query_next_candidates(chat_id, n, prefix).await,
         }
     }
 
     /// Status of the latest ingestion run for an export path, if any.
     pub async fn export_run_status(&self, export_path: &str) -> anyhow::Result<Option<String>> {
         match self {
-            Store::Pg(s) => s.export_run_status(export_path).await,
             Store::InMemory(s) => s.export_run_status(export_path).await,
+            Store::Hybrid(h) => h.pg.export_run_status(export_path).await,
         }
     }
 
     pub async fn start_ingestion_run(&self, export_path: &str) -> anyhow::Result<i64> {
         match self {
-            Store::Pg(s) => s.start_ingestion_run(export_path).await,
             Store::InMemory(s) => s.start_ingestion_run(export_path).await,
+            Store::Hybrid(h) => h.pg.start_ingestion_run(export_path).await,
         }
     }
 
@@ -135,22 +159,22 @@ impl Store {
         tokens: i64,
     ) -> anyhow::Result<()> {
         match self {
-            Store::Pg(s) => s.complete_ingestion_run(run_id, messages, tokens).await,
             Store::InMemory(s) => s.complete_ingestion_run(run_id, messages, tokens).await,
+            Store::Hybrid(h) => h.pg.complete_ingestion_run(run_id, messages, tokens).await,
         }
     }
 
     pub async fn mark_ingestion_run_error(&self, run_id: i64, message: &str) -> anyhow::Result<()> {
         match self {
-            Store::Pg(s) => s.mark_ingestion_run_error(run_id, message).await,
             Store::InMemory(s) => s.mark_ingestion_run_error(run_id, message).await,
+            Store::Hybrid(h) => h.pg.mark_ingestion_run_error(run_id, message).await,
         }
     }
 
     pub async fn upsert_chat(&self, parsed: &ParsedExport) -> anyhow::Result<()> {
         match self {
-            Store::Pg(s) => s.upsert_chat(parsed).await,
             Store::InMemory(s) => s.upsert_chat(parsed).await,
+            Store::Hybrid(h) => h.pg.upsert_chat(parsed).await,
         }
     }
 
@@ -160,8 +184,8 @@ impl Store {
         run_id: i64,
     ) -> anyhow::Result<i64> {
         match self {
-            Store::Pg(s) => s.upsert_raw_message(msg, run_id).await,
             Store::InMemory(s) => s.upsert_raw_message(msg, run_id).await,
+            Store::Hybrid(h) => h.pg.upsert_raw_message(msg, run_id).await,
         }
     }
 
@@ -172,8 +196,8 @@ impl Store {
         raw_message_id: i64,
     ) -> anyhow::Result<i64> {
         match self {
-            Store::Pg(s) => s.upsert_message(msg, run_id, raw_message_id).await,
             Store::InMemory(s) => s.upsert_message(msg, run_id, raw_message_id).await,
+            Store::Hybrid(h) => h.pg.upsert_message(msg, run_id, raw_message_id).await,
         }
     }
 
@@ -183,9 +207,11 @@ impl Store {
         position: i32,
         token_id: i64,
     ) -> anyhow::Result<()> {
+        // Tokens are in the in-memory cache, so per-message token links are a
+        // no-op here (they are recomputed from message fragments on rebuild).
         match self {
-            Store::Pg(s) => s.insert_message_token(message_id, position, token_id).await,
             Store::InMemory(s) => s.insert_message_token(message_id, position, token_id).await,
+            Store::Hybrid(h) => h.cache.insert_message_token(message_id, position, token_id).await,
         }
     }
 
@@ -195,9 +221,41 @@ impl Store {
         message_id: i64,
     ) -> anyhow::Result<()> {
         match self {
-            Store::Pg(s) => s.upsert_ingestion_offset(chat_id, message_id).await,
             Store::InMemory(s) => s.upsert_ingestion_offset(chat_id, message_id).await,
+            Store::Hybrid(h) => h.pg.upsert_ingestion_offset(chat_id, message_id).await,
         }
+    }
+
+    /// Returns every stored message's fragments (from the durable history).
+    pub async fn fetch_messages_for_rebuild(&self) -> anyhow::Result<Vec<StoredMessage>> {
+        match self {
+            Store::InMemory(_) => Ok(Vec::new()),
+            Store::Hybrid(h) => h.pg.fetch_messages_for_rebuild().await,
+        }
+    }
+
+    /// Rebuilds the in-memory token and n-gram cache from the durable message
+    /// history. No-op for the fully in-memory store.
+    pub async fn rebuild_cache(&self, max_n: usize, min_n: usize) -> anyhow::Result<()> {
+        if !matches!(self, Store::Hybrid(_)) {
+            return Ok(());
+        }
+
+        let messages = self.fetch_messages_for_rebuild().await?;
+        let mut count = 0usize;
+        for m in &messages {
+            let tokens = tokenize_fragments(&m.fragments);
+            let mut ids = Vec::with_capacity(tokens.len());
+            for t in &tokens {
+                let id = self.ensure_token(t).await?;
+                ids.push(id);
+            }
+            train_token_ids(self, m.chat_id, &ids, max_n, min_n).await?;
+            count += 1;
+        }
+
+        info!(messages = count, "rebuilt in-memory token/n-gram cache from DB history");
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -213,7 +271,7 @@ impl Store {
         error_message: Option<&str>,
     ) -> anyhow::Result<()> {
         match self {
-            Store::Pg(s) => {
+            Store::InMemory(s) => {
                 s.log_inline_query(
                     inline_query_id,
                     user_id,
@@ -226,8 +284,8 @@ impl Store {
                 )
                 .await
             }
-            Store::InMemory(s) => {
-                s.log_inline_query(
+            Store::Hybrid(h) => {
+                h.pg.log_inline_query(
                     inline_query_id,
                     user_id,
                     user_username,

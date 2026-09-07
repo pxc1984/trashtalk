@@ -60,7 +60,18 @@ async fn main() -> anyhow::Result<()> {
             .context("applying local schema files")?;
         debug!("schema applied");
 
-        Arc::new(infrastructure::store::Store::Pg(infrastructure::store::PgStore::new(pool)))
+        // Hybrid backend: message history stays in PostgreSQL, while the token
+        // vocabulary and n-gram statistics live in the in-memory cache.
+        let store = infrastructure::store::Store::Hybrid(
+            infrastructure::store::HybridStore::new(pool),
+        );
+        info!("stage: rebuilding in-memory cache from DB history");
+        store
+            .rebuild_cache(config.ngram_size, config.min_ngram_size)
+            .await
+            .context("rebuilding in-memory token/n-gram cache")?;
+        debug!("in-memory cache rebuilt");
+        Arc::new(store)
     };
     info!("store ready");
 

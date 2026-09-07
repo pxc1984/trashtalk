@@ -4,6 +4,7 @@ mod pg;
 pub use memory::InMemoryStore;
 pub use pg::PgStore;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use sqlx::PgPool;
@@ -19,19 +20,20 @@ use crate::infrastructure::telegram_export::{NormalizedMessage, ParsedExport};
 /// The store backing the app: the token vocabulary, the n-gram statistics, and
 /// the ingestion/bookkeeping rows.
 ///
-/// Two backends exist:
-/// - [`Store::InMemory`] — everything lives in the process's RAM, selected with
-///   `USE_INMEMORY_STORE=true`. Fast to start, no schema, but all data is lost
-///   on shutdown.
-/// - [`Store::Hybrid`] — the DB-backed default. Message history is durable in
-///   PostgreSQL, while the token vocabulary and n-gram statistics live in the
-///   in-memory cache and are rebuilt from that history on startup (they are
-///   cheap to recompute).
+/// Three backends exist:
+/// - [`Store::Pg`] — everything durable in PostgreSQL (the default).
+/// - [`Store::InMemory`] — everything in the process's RAM, selected with
+///   `USE_INMEMORY_STORE=true`. Fast, no schema, but lost on shutdown unless
+///   dumped to `trashtalk.bin`.
+/// - [`Store::Hybrid`] — durable message history in PostgreSQL plus token and
+///   n-gram statistics in an in-memory cache rebuilt from history on startup,
+///   selected with `USE_HYBRID_MODE=true`.
 ///
 /// The enum is always shared behind [`SharedStore`] (`Arc`), never moved by
 /// value, so the size of the largest variant is irrelevant.
 #[allow(clippy::large_enum_variant)]
 pub enum Store {
+    Pg(PgStore),
     InMemory(InMemoryStore),
     Hybrid(HybridStore),
 }
@@ -61,6 +63,7 @@ impl Store {
         description: Option<&str>,
     ) -> anyhow::Result<i64> {
         match self {
+            Store::Pg(s) => s.ensure_custom_emoji(document_id, emoji_code, description).await,
             Store::InMemory(s) => s.ensure_custom_emoji(document_id, emoji_code, description).await,
             Store::Hybrid(h) => h.cache.ensure_custom_emoji(document_id, emoji_code, description).await,
         }
@@ -89,6 +92,7 @@ impl Store {
         emoji_id: Option<i64>,
     ) -> anyhow::Result<i64> {
         match self {
+            Store::Pg(s) => s.ensure_token_record(token_type, token_value, emoji_id).await,
             Store::InMemory(s) => s.ensure_token_record(token_type, token_value, emoji_id).await,
             Store::Hybrid(h) => h.cache.ensure_token_record(token_type, token_value, emoji_id).await,
         }
@@ -97,6 +101,7 @@ impl Store {
     /// Returns the full records for the given token ids.
     pub async fn fetch_tokens(&self, ids: &[i64]) -> anyhow::Result<Vec<TokenRecord>> {
         match self {
+            Store::Pg(s) => s.fetch_tokens(ids).await,
             Store::InMemory(s) => s.fetch_tokens(ids).await,
             Store::Hybrid(h) => h.cache.fetch_tokens(ids).await,
         }
@@ -117,6 +122,7 @@ impl Store {
         next_token: i64,
     ) -> anyhow::Result<()> {
         match self {
+            Store::Pg(s) => s.upsert_ngram(chat_id, n, prefix, next_token).await,
             Store::InMemory(s) => s.upsert_ngram(chat_id, n, prefix, next_token).await,
             Store::Hybrid(h) => h.cache.upsert_ngram(chat_id, n, prefix, next_token).await,
         }
@@ -132,6 +138,7 @@ impl Store {
         prefix: &[i64],
     ) -> anyhow::Result<Vec<NgramCandidate>> {
         match self {
+            Store::Pg(s) => s.query_next_candidates(chat_id, n, prefix).await,
             Store::InMemory(s) => s.query_next_candidates(chat_id, n, prefix).await,
             Store::Hybrid(h) => h.cache.query_next_candidates(chat_id, n, prefix).await,
         }
@@ -140,6 +147,7 @@ impl Store {
     /// Status of the latest ingestion run for an export path, if any.
     pub async fn export_run_status(&self, export_path: &str) -> anyhow::Result<Option<String>> {
         match self {
+            Store::Pg(s) => s.export_run_status(export_path).await,
             Store::InMemory(s) => s.export_run_status(export_path).await,
             Store::Hybrid(h) => h.pg.export_run_status(export_path).await,
         }
@@ -147,6 +155,7 @@ impl Store {
 
     pub async fn start_ingestion_run(&self, export_path: &str) -> anyhow::Result<i64> {
         match self {
+            Store::Pg(s) => s.start_ingestion_run(export_path).await,
             Store::InMemory(s) => s.start_ingestion_run(export_path).await,
             Store::Hybrid(h) => h.pg.start_ingestion_run(export_path).await,
         }
@@ -159,6 +168,7 @@ impl Store {
         tokens: i64,
     ) -> anyhow::Result<()> {
         match self {
+            Store::Pg(s) => s.complete_ingestion_run(run_id, messages, tokens).await,
             Store::InMemory(s) => s.complete_ingestion_run(run_id, messages, tokens).await,
             Store::Hybrid(h) => h.pg.complete_ingestion_run(run_id, messages, tokens).await,
         }
@@ -166,6 +176,7 @@ impl Store {
 
     pub async fn mark_ingestion_run_error(&self, run_id: i64, message: &str) -> anyhow::Result<()> {
         match self {
+            Store::Pg(s) => s.mark_ingestion_run_error(run_id, message).await,
             Store::InMemory(s) => s.mark_ingestion_run_error(run_id, message).await,
             Store::Hybrid(h) => h.pg.mark_ingestion_run_error(run_id, message).await,
         }
@@ -173,6 +184,7 @@ impl Store {
 
     pub async fn upsert_chat(&self, parsed: &ParsedExport) -> anyhow::Result<()> {
         match self {
+            Store::Pg(s) => s.upsert_chat(parsed).await,
             Store::InMemory(s) => s.upsert_chat(parsed).await,
             Store::Hybrid(h) => h.pg.upsert_chat(parsed).await,
         }
@@ -184,6 +196,7 @@ impl Store {
         run_id: i64,
     ) -> anyhow::Result<i64> {
         match self {
+            Store::Pg(s) => s.upsert_raw_message(msg, run_id).await,
             Store::InMemory(s) => s.upsert_raw_message(msg, run_id).await,
             Store::Hybrid(h) => h.pg.upsert_raw_message(msg, run_id).await,
         }
@@ -196,6 +209,7 @@ impl Store {
         raw_message_id: i64,
     ) -> anyhow::Result<i64> {
         match self {
+            Store::Pg(s) => s.upsert_message(msg, run_id, raw_message_id).await,
             Store::InMemory(s) => s.upsert_message(msg, run_id, raw_message_id).await,
             Store::Hybrid(h) => h.pg.upsert_message(msg, run_id, raw_message_id).await,
         }
@@ -207,9 +221,10 @@ impl Store {
         position: i32,
         token_id: i64,
     ) -> anyhow::Result<()> {
-        // Tokens are in the in-memory cache, so per-message token links are a
-        // no-op here (they are recomputed from message fragments on rebuild).
         match self {
+            Store::Pg(s) => s.insert_message_token(message_id, position, token_id).await,
+            // Tokens are in the in-memory cache, so per-message token links are
+            // a no-op here (they are recomputed from fragments on rebuild).
             Store::InMemory(s) => s.insert_message_token(message_id, position, token_id).await,
             Store::Hybrid(h) => h.cache.insert_message_token(message_id, position, token_id).await,
         }
@@ -221,6 +236,7 @@ impl Store {
         message_id: i64,
     ) -> anyhow::Result<()> {
         match self {
+            Store::Pg(s) => s.upsert_ingestion_offset(chat_id, message_id).await,
             Store::InMemory(s) => s.upsert_ingestion_offset(chat_id, message_id).await,
             Store::Hybrid(h) => h.pg.upsert_ingestion_offset(chat_id, message_id).await,
         }
@@ -229,13 +245,14 @@ impl Store {
     /// Returns every stored message's fragments (from the durable history).
     pub async fn fetch_messages_for_rebuild(&self) -> anyhow::Result<Vec<StoredMessage>> {
         match self {
+            Store::Pg(s) => s.fetch_messages_for_rebuild().await,
             Store::InMemory(_) => Ok(Vec::new()),
             Store::Hybrid(h) => h.pg.fetch_messages_for_rebuild().await,
         }
     }
 
     /// Rebuilds the in-memory token and n-gram cache from the durable message
-    /// history. No-op for the fully in-memory store.
+    /// history. Only meaningful for the hybrid store.
     pub async fn rebuild_cache(&self, max_n: usize, min_n: usize) -> anyhow::Result<()> {
         if !matches!(self, Store::Hybrid(_)) {
             return Ok(());
@@ -258,6 +275,19 @@ impl Store {
         Ok(())
     }
 
+    /// Snapshots the in-memory store to `exports_dir/trashtalk.bin`. No-op for
+    /// the PostgreSQL and hybrid stores.
+    pub async fn save_to_disk(&self, exports_dir: &str) -> anyhow::Result<()> {
+        match self {
+            Store::InMemory(s) => {
+                let path = Path::new(exports_dir).join(TRASHTALK_BIN);
+                info!(path = %path.display(), "saving in-memory store to disk");
+                s.save_to_file(&path)
+            }
+            Store::Pg(_) | Store::Hybrid(_) => Ok(()),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn log_inline_query(
         &self,
@@ -271,6 +301,19 @@ impl Store {
         error_message: Option<&str>,
     ) -> anyhow::Result<()> {
         match self {
+            Store::Pg(s) => {
+                s.log_inline_query(
+                    inline_query_id,
+                    user_id,
+                    user_username,
+                    chat_type,
+                    query_text,
+                    response_text,
+                    success,
+                    error_message,
+                )
+                .await
+            }
             Store::InMemory(s) => {
                 s.log_inline_query(
                     inline_query_id,
@@ -303,3 +346,7 @@ impl Store {
 
 /// Convenience alias for the store shared across async tasks.
 pub type SharedStore = Arc<Store>;
+
+/// File name (inside the exports directory) where the in-memory store is
+/// snapshotted on graceful shutdown and reloaded from on startup.
+pub const TRASHTALK_BIN: &str = "trashtalk.bin";

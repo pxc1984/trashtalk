@@ -148,3 +148,85 @@ async fn process_export(state: SharedState, export_dir: PathBuf) -> anyhow::Resu
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::application::generator::GeneratorService;
+    use crate::config::Config;
+    use crate::infrastructure::store::{InMemoryStore, Store};
+    use crate::state::AppState;
+
+    /// Minimal, greedy config so generation is deterministic enough to assert on.
+    fn test_config() -> Config {
+        Config {
+            database_url: String::new(),
+            exports_dir: "exports".into(),
+            ngram_size: 2,
+            min_ngram_size: 2,
+            max_generation_length: 64,
+            generation_temperature: 0.0, // greedy
+            generation_top_k: 0,
+            generation_top_p: 1.0,
+            repetition_penalty: 1.0,
+            num_candidates: 1,
+            min_generation_tokens: 1,
+            reply_chance: 0.0,
+            sticker_chance: 0.0,
+            ingestion_interval: Duration::from_secs(3600),
+            ingestion_workers: 1,
+            heartbeat_interval: Duration::from_secs(3600),
+            bot_token: None,
+            use_inmemory_store: true,
+            use_hybrid_mode: false,
+        }
+    }
+
+    /// The bot must learn from a chat export, associate the learned data with
+    /// the `chat_id` declared in `result.json` ("id"), and use it when
+    /// generating for that group.
+    #[tokio::test]
+    async fn learns_from_chatexport_scoped_to_export_chat_id() {
+        let dir =
+            std::env::temp_dir().join(format!("trashtalk_ingest_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let json = r#"{
+            "id": 42,
+            "name": "Test Group",
+            "type": "private_supergroup",
+            "messages": [
+                {"id": 1, "type": "message", "date": "2024-01-01 10:00:00", "from_id": "u1", "text": "привет мир"},
+                {"id": 2, "type": "message", "date": "2024-01-01 10:01:00", "from_id": "u2", "text": "как дела"}
+            ]
+        }"#;
+        std::fs::write(dir.join("result.json"), json).unwrap();
+
+        let store = Arc::new(Store::InMemory(InMemoryStore::new()));
+        let state = Arc::new(AppState::new(test_config(), store.clone()));
+
+        // Real ingestion path: read_export + train, scoped to the export's chat.
+        super::process_export(state.clone(), dir.clone()).await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The learned data is associated with the export's chat id (42): chat 42
+        // has tokens, an unrelated chat (99) has none.
+        let chat42 = store.query_next_candidates(Some(42), 1, &[]).await.unwrap();
+        let chat99 = store.query_next_candidates(Some(99), 1, &[]).await.unwrap();
+        assert!(!chat42.is_empty(), "chat 42 should have learned tokens from the export");
+        assert!(chat99.is_empty(), "chat 99 should have no data from the export");
+
+        // Generating for that group uses the export-learned words.
+        let svc = GeneratorService::new(state);
+        let output = svc
+            .generate_text_for_prefix(String::new(), 32, Some(42))
+            .await
+            .unwrap();
+        assert!(
+            ["привет", "мир", "как", "дела"].iter().any(|w| output.text.contains(w)),
+            "generation for chat 42 should use export-learned words, got: {:?}",
+            output.text
+        );
+    }
+}

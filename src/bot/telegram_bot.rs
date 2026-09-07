@@ -98,7 +98,6 @@ async fn run_bot(state: SharedState, token: String, max_tokens: usize) -> anyhow
     tokio::spawn(chat_message_loop(bot.clone(), state.clone(), chats.clone()));
 
     Dispatcher::builder(bot, handler)
-        .enable_ctrlc_handler()
         .build()
         .dispatch()
         .await;

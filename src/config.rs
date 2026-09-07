@@ -32,11 +32,19 @@ pub struct Config {
     /// When true, all store data lives in the process's RAM instead of
     /// PostgreSQL. Selected with `USE_INMEMORY_STORE=true`.
     pub use_inmemory_store: bool,
+    /// When true (with a database), message history is stored in PostgreSQL
+    /// while tokens and n-gram statistics live in an in-memory cache rebuilt
+    /// from history on startup. Selected with `USE_HYBRID_MODE=true`. The
+    /// default (no flags) is the pure-PostgreSQL store.
+    pub use_hybrid_mode: bool,
 }
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let use_inmemory_store = env::var("USE_INMEMORY_STORE")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false);
+        let use_hybrid_mode = env::var("USE_HYBRID_MODE")
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
             .unwrap_or(false);
 
@@ -125,6 +133,7 @@ impl Config {
             heartbeat_interval: Duration::from_secs(heartbeat_interval_secs.max(5)),
             bot_token,
             use_inmemory_store,
+            use_hybrid_mode,
         })
     }
 }

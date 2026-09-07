@@ -155,6 +155,27 @@ pub async fn upsert_ingestion_offset(
     Ok(())
 }
 
+/// Links a token to a message position. Used by the pure-PostgreSQL backend;
+/// the hybrid and in-memory backends keep tokens in RAM instead.
+pub async fn insert_message_token(
+    pool: &PgPool,
+    message_id: i64,
+    position: i32,
+    token_id: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"INSERT INTO message_tokens (message_id, position, token_id)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (message_id, position) DO NOTHING"#,
+    )
+    .bind(message_id)
+    .bind(position)
+    .bind(token_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// A stored message's content, enough to rebuild the in-memory cache: which
 /// chat it belongs to and its normalized fragments.
 pub struct StoredMessage {

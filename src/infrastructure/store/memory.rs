@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::infrastructure::db::ngram_repository::NgramCandidate;
@@ -8,7 +10,7 @@ use crate::infrastructure::db::token_repository::TokenRecord;
 use crate::infrastructure::telegram_export::{NormalizedMessage, ParsedExport};
 
 /// A `Token`-keyed identity used to deduplicate the in-memory vocabulary.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct TokenKey {
     token_type: String,
     token_value: Option<String>,
@@ -16,7 +18,7 @@ struct TokenKey {
 }
 
 /// A single ingestion run, mirroring the PostgreSQL `ingestion_runs` row.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct RunRecord {
     export_path: String,
     status: String,
@@ -29,7 +31,7 @@ struct RunRecord {
 type NgramMap = HashMap<i64, HashMap<(usize, Vec<i64>), HashMap<i64, i64>>>;
 
 /// All mutable state behind the store's lock.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct Data {
     tokens: HashMap<TokenKey, i64>,
     token_records: HashMap<i64, TokenRecord>,
@@ -61,6 +63,35 @@ impl InMemoryStore {
         Self {
             data: Mutex::new(Data::default()),
         }
+    }
+
+    /// Serializes the store to `path` (binary). Written to a temp file and
+    /// renamed so a crash mid-write never leaves a corrupt `trashtalk.bin`.
+    pub fn save_to_file(&self, path: &Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let data = self.data.lock().unwrap();
+        let bytes = bincode::serialize(&*data)?;
+        drop(data);
+
+        let tmp = path.with_extension("bin.tmp");
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Loads a store previously saved by [`save_to_file`](Self::save_to_file).
+    /// Returns `None` when no file exists.
+    pub fn load_from_file(path: &Path) -> anyhow::Result<Option<Self>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = std::fs::read(path)?;
+        let data: Data = bincode::deserialize(&bytes)?;
+        Ok(Some(Self {
+            data: Mutex::new(data),
+        }))
     }
 }
 
@@ -382,5 +413,32 @@ mod tests {
     pub async fn fetch_missing_token_returns_none() {
         let s = store();
         assert!(s.fetch_tokens(&[4242]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    pub async fn save_and_load_roundtrip() {
+        let dir =
+            std::env::temp_dir().join(format!("trashtalk_bin_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trashtalk.bin");
+
+        let s = store();
+        s.upsert_ngram(7, 2, &[1], 2).await.unwrap();
+        s.upsert_ngram(7, 1, &[], 5).await.unwrap();
+        let mem = match &s {
+            Store::InMemory(m) => m,
+            Store::Pg(_) | Store::Hybrid(_) => unreachable!(),
+        };
+        mem.save_to_file(&path).unwrap();
+
+        let loaded = InMemoryStore::load_from_file(&path).unwrap().unwrap();
+        let loaded_store = Store::InMemory(loaded);
+
+        let bigram = loaded_store.query_next_candidates(Some(7), 2, &[1]).await.unwrap();
+        assert_eq!(bigram, vec![(2, 1)]);
+        let unigram = loaded_store.query_next_candidates(Some(7), 1, &[]).await.unwrap();
+        assert!(unigram.contains(&(5, 1)));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

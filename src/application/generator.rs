@@ -458,6 +458,7 @@ mod tests {
             heartbeat_interval: Duration::from_secs(3600),
             bot_token: None,
             use_inmemory_store: true,
+            use_hybrid_mode: false,
         }
     }
 

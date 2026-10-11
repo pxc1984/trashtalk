@@ -1,0 +1,69 @@
+name: CI/CD
+
+# push в master: собрать образ ghcr.io/pxc1984/trashtalk:<sha> и выкатить.
+# Деплой = смена тега в pxc1984/homelab (apps/trashtalk/values.yaml), дальше
+# Argo CD выкатывает сам (k3s, узел grm, namespace trashtalk).
+# Секрет окружения deploy-dev: HOMELAB_DEPLOY_KEY (deploy key с записью в homelab).
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max
+
+  deploy:
+    name: Deploy (bump tag in homelab)
+    needs: build
+    runs-on: ubuntu-latest
+    environment: deploy-dev
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: pxc1984/homelab
+          ssh-key: ${{ secrets.HOMELAB_DEPLOY_KEY }}
+      - name: Update image tag
+        env:
+          TAG: ${{ github.sha }}
+        run: |
+          values=apps/trashtalk/values.yaml
+          [ -f "$values" ] || { echo "::error::$values не найден в homelab"; exit 1; }
+          sed -i -E "s/^(  tag: )[^ ]+/\1${TAG}/" "$values"
+          git diff --exit-code && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "trashtalk: deploy ${TAG::7}"
+          for attempt in 1 2 3; do
+            git push && exit 0
+            git pull --rebase
+          done
+          exit 1
